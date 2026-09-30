@@ -245,6 +245,7 @@ esac
 export REMEMBER_HOOK_CWD
 
 source "$_HOOK_DIR/lib-clock.sh"
+source "$_HOOK_DIR/lib-session-id.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
 # Defined here rather than beside the dispatch it also guards, because the fast
@@ -400,7 +401,10 @@ fi
 # fallback), and _stdin_json_string already defined there. session_id is
 # extracted from that same capture rather than reading stdin a second time —
 # it is a single stream and a second read here would see EOF.
-STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+_RAW_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
+STDIN_SESSION_ID=$(remember_normalize_session_id "$_RAW_SESSION_ID")   # issue: vscode
+REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$_RAW_SESSION_ID"); export REMEMBER_HOST_HINT
+unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id now faces too (#620) -- both are

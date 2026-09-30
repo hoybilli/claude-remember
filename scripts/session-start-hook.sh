@@ -215,6 +215,7 @@ export REMEMBER_HOOK_CWD
 # is why this hook never reaches this line for that child; resolve-paths.sh
 # keeps its own copy of the same guard for every OTHER caller that sources it.
 REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+source "$_HOOK_DIR/lib-session-id.sh"
 # Defer the Python candidate probe (#662): this foreground path only ever
 # needs $PYTHON through four call sites, all jq-less fallbacks (the config
 # merge, the config flatten, the per-key read, and _jq_fallback itself) --
@@ -289,7 +290,12 @@ _stdin_session_id() {
     _stdin_json_string session_id "$1"
 }
 
-CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
+_RAW_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
+# issue: vscode -- VS Code Agents prefixes the uuid (`agent-host-copilotcli:/`);
+# strip it before the allowlist below, which correctly rejects `:` and `/`.
+CURRENT_SESSION_ID=$(remember_normalize_session_id "$_RAW_SESSION_ID")
+REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$_RAW_SESSION_ID"); export REMEMBER_HOST_HINT
+unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename. This is compared against
 # names taken off the transcript directory, and `..` would match nothing
 # useful while `/` would match across directories, so it faces the same guard
@@ -316,6 +322,13 @@ case "$REMEMBER_TRANSCRIPT_PATH" in
     *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
 esac
 export REMEMBER_TRANSCRIPT_PATH
+# issue: vscode -- VS Code hands over a transcript_path that cannot exist on
+# Windows (a directory name containing a colon). Drop it on that host only, so
+# pipeline/haiku.py does not log a "vanished transcript" receipt on every save;
+# every other host keeps #477's receipt exactly as before.
+if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ -n "$REMEMBER_TRANSCRIPT_PATH" ] && [ ! -f "$REMEMBER_TRANSCRIPT_PATH" ]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 
 # ── Which KIND of SessionStart is this? (#339) ────────────────────────────
 # `source` is one of startup | resume | clear | compact | fork. It is read for

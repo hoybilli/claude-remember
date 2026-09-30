@@ -151,6 +151,7 @@ else
 fi
 
 source "$_HOOK_DIR/lib-clock.sh"
+source "$_HOOK_DIR/lib-session-id.sh"
 
 # The same deliberately narrow extractor post-tool-hook.sh and
 # session-start-hook.sh use: the key must be followed by nothing but
@@ -179,7 +180,10 @@ _stdin_json_string() {
     printf '%s' "$value"
 }
 
-STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+_RAW_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
+STDIN_SESSION_ID=$(remember_normalize_session_id "$_RAW_SESSION_ID")   # issue: vscode
+REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$_RAW_SESSION_ID"); export REMEMBER_HOST_HINT
+unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename — same validation
 # post-tool-hook.sh applies before this id becomes a path component or an
 # argument to another script.
@@ -221,6 +225,13 @@ case "$REMEMBER_TRANSCRIPT_PATH" in
     *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
 esac
 export REMEMBER_TRANSCRIPT_PATH
+# issue: vscode -- VS Code hands over a transcript_path that cannot exist on
+# Windows (a directory name containing a colon). Drop it on that host only, so
+# pipeline/haiku.py does not log a "vanished transcript" receipt on every save;
+# every other host keeps #477's receipt exactly as before.
+if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ -n "$REMEMBER_TRANSCRIPT_PATH" ] && [ ! -f "$REMEMBER_TRANSCRIPT_PATH" ]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 
 # ── The cwd the host handed us (#411) ─────────────────────────────────────
 # Same field, same reasoning as session-start-hook.sh's identical block:
