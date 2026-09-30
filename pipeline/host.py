@@ -284,7 +284,8 @@ def sniff_envelope(obj: object) -> str:
     the envelope it is deciding is still a property of the whole session
     file -- one host wrote it start to finish -- not of any one line.
 
-    Returns ``"claude-code"``, ``"codex"``, ``"antigravity"`` (#563), or
+    Returns ``"claude-code"``, ``"codex"``, ``"antigravity"`` (#563),
+    ``"copilot"`` (VS Code Agents / GitHub Copilot harness), or
     ``"unrecognised"``. The last of those matters as much as the first
     three: a transcript shape this module does not know is reported loud
     rather than silently parsed as though it held zero exchanges, which is
@@ -297,6 +298,16 @@ def sniff_envelope(obj: object) -> str:
     # and whatever a future Codex release adds -- carries a `payload` object.
     if isinstance(obj.get("payload"), dict):
         return "codex"
+    # VS Code Agents / GitHub Copilot harness (issue: vscode): every line of
+    # ~/.copilot/session-state/<uuid>/events.jsonl is
+    # {"type": "<dotted.name>", "data": {...}} -- `session.start`,
+    # `user.message`, `assistant.message`, `tool.execution_complete`,
+    # `hook.start`, ... The marker is structural: a dotted `type` plus a
+    # `data` object. Claude Code's own `type` values never contain a dot and
+    # never carry `data`; Codex was already answered above.
+    obj_type = obj.get("type")
+    if isinstance(obj_type, str) and "." in obj_type and isinstance(obj.get("data"), dict):
+        return "copilot"
     if isinstance(obj.get("message"), dict) or obj.get("type") in ("user", "assistant", "summary", "system"):
         return "claude-code"
     # Antigravity CLI (`agy`, #563): a flat per-step object, never nested --
