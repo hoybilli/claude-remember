@@ -66,3 +66,57 @@ def test_without_copilot_transcript_old_warning_still_fires(tmp_path):
     home, project, remember = _layout(tmp_path, with_copilot=False)
     logs = _run(home, project, remember)
     assert "no session dir for this project" in logs
+
+
+def _lib_call(tmp_path, arg, home=None, any_file_exists=False):
+    home = home or (tmp_path / "home")
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    env.pop("COPILOT_HOME", None)
+    lib = (REPO_ROOT / "scripts" / "lib-session-id.sh").as_posix()
+    # any_file_exists shadows `[` so every -f test succeeds: only the id guard can
+    # refuse then (a dir named "a\b" cannot be created on Windows filesystems).
+    shadow = '[() { return 0; }; ' if any_file_exists else ''
+    code = 'source "$1"; ' + shadow + 'out=$(remember_copilot_transcript_for "$2"); rc=$?; printf "%s|%s" "$rc" "$out"'
+    r = subprocess.run([BASH, "-c", code, "x", lib, arg], env=env, capture_output=True, timeout=60)
+    rc, _, out = decode_bash_output(r.stdout).partition("|")
+    return int(rc), out
+
+
+HOSTILE = ["", ".", "..", "../x", "a/b", "a" + chr(92) + "b", ".." + chr(92) + ".." + chr(92) + "x", "a:b"]
+
+
+def test_copilot_transcript_for_positive_control(tmp_path):
+    home, _project, _remember = _layout(tmp_path, with_copilot=True)
+    rc, out = _lib_call(tmp_path, UUID, home)
+    assert rc == 0
+    assert out.replace(chr(92), "/").endswith(f"session-state/{UUID}/events.jsonl")
+
+
+@pytest.mark.parametrize("hostile", HOSTILE)
+def test_copilot_transcript_for_refuses_hostile_ids(tmp_path, hostile):
+    home, _project, _remember = _layout(tmp_path, with_copilot=True)
+    # Decoys so a missing guard would resolve a real file rather than fail vacuously.
+    ss = home / ".copilot" / "session-state"
+    (ss / "events.jsonl").write_text("{}", encoding="utf-8")
+    (ss.parent / "x").mkdir()
+    (ss.parent / "x" / "events.jsonl").write_text("{}", encoding="utf-8")  # "../x" target
+    (ss / "a").mkdir()
+    (ss / "a" / "events.jsonl").write_text("{}", encoding="utf-8")  # "a/b" neighbour
+    rc, out = _lib_call(tmp_path, hostile, home)
+    assert rc != 0
+    assert out == ""
+
+
+@pytest.mark.parametrize("hostile", HOSTILE)
+def test_copilot_transcript_for_guard_refuses_even_if_file_exists(tmp_path, hostile):
+    """Non-vacuous: with `[` shadowed to always succeed, the case guard alone
+    must reject the id (a mutated guard makes this fail)."""
+    rc, out = _lib_call(tmp_path, hostile, any_file_exists=True)
+    assert rc != 0
+    assert out == ""
+
+
+def test_shadowed_test_builtin_lets_a_plain_id_through(tmp_path):
+    """Positive control for the shadowed-`[` negatives."""
+    rc, out = _lib_call(tmp_path, UUID, any_file_exists=True)
+    assert rc == 0 and UUID in out

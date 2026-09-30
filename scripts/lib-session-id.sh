@@ -44,8 +44,9 @@ remember_session_id_host_hint() {
 # exists, else nothing. Mirrors pipeline/host.copilot_transcript_for().
 remember_copilot_transcript_for() {
     case "$1" in
-        ''|.|..|*/*|*\*|*:*) return 1 ;;
+        ''|.|..|*/*|*\\*|*:*) return 1 ;;
     esac
+    local _rc_base _rc_path
     _rc_base="${COPILOT_HOME:-${HOME:-}/.copilot}"
     _rc_path="${_rc_base%/}/session-state/$1/events.jsonl"
     [ -f "$_rc_path" ] || return 1
