@@ -18,6 +18,9 @@ teaching this module a fourth column here:
     | plugin-root env var | `CLAUDE_PLUGIN_ROOT` | `PLUGIN_ROOT` (+ `CLAUDE_*` alias) | none documented |
     | project-dir env var | `CLAUDE_PROJECT_DIR` | `CLAUDE_PROJECT_DIR` (compat alias) | `CLAUDE_PROJECT_DIR` (compat alias, #456) |
 
+A fifth shape, VS Code Agents (GitHub Copilot harness), has no column either: it is
+recognised only by its transcript envelope (`sniff_envelope` -> `"copilot"`).
+
 The stdin payload is the only part all three arrived at independently. The
 environment is the parochial part: Codex's `CLAUDE_PLUGIN_ROOT` is a
 compatibility alias it chose to extend and can withdraw, and Gemini documents no

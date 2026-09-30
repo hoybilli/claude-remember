@@ -7,7 +7,7 @@ Neither Claude Code's (`message`/`type` in user|assistant|...), Codex's
 (`payload`) nor Antigravity's (`step_index`/`source`) reader can place it.
 
 Fixture tests/fixtures/vscode-events.jsonl is a trimmed, sanitized copy of a
-real session captured on Windows 11 / VS Code 1.139.1 on 2026-09-30 -- not
+real session captured 2026-09-06 on Windows 11 / VS Code 1.139.1, sanitized 2026-09-30 -- not
 constructed.
 """
 from __future__ import annotations
