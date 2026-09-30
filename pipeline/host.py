@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -560,3 +561,41 @@ def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
     if not os.path.isfile(value):
         return None
     return value
+
+
+_COPILOT_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def copilot_session_state_dir(env: Mapping[str, str] | None = None) -> str:
+    """``$COPILOT_HOME/session-state`` or ``~/.copilot/session-state``.
+
+    ``HOME`` is honoured explicitly (test fixtures patch HOME; on Windows
+    ``os.path.expanduser`` reads USERPROFILE instead), the same way
+    ``pipeline.extract._session_dir`` does for Claude Code.
+    """
+    env = os.environ if env is None else env
+    base = (env.get("COPILOT_HOME") or "").strip()
+    if not base:
+        home = env.get("HOME") or os.path.expanduser("~")
+        base = home.rstrip("/\\") + "/.copilot"
+    return base.rstrip("/\\") + "/session-state"
+
+
+def copilot_transcript_for(session_id: str, env: Mapping[str, str] | None = None) -> str | None:
+    """The VS Code Agents / Copilot events file for a bare uuid, if it exists.
+
+    Existence-keyed on purpose (issue: vscode): a Claude Code session never
+    has a directory here, so a uuid that resolves is a Copilot session by
+    construction. Anything that is not exactly a uuid returns ``None`` before
+    any path is joined -- the prefixed form the host puts on stdin
+    (``agent-host-copilotcli:/<uuid>``) is normalised on the shell side and
+    is rejected here so the two layers cannot disagree silently.
+    """
+    if not session_id or not _COPILOT_UUID_RE.match(session_id):
+        return None
+    path = os.path.normpath(
+        os.path.join(copilot_session_state_dir(env), session_id, "events.jsonl")
+    )
+    return path if os.path.isfile(path) else None

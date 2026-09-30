@@ -294,10 +294,17 @@ def find_session(session_id: str | None = None,
     design, the same way it already trusts ``$PATH`` or ``$HOME``. See
     ``pipeline/host.transcript_path()``'s docstring for why a containment
     check was rejected rather than merely deferred.
+
+    A bare uuid that names an existing Copilot session-state transcript
+    (issue: vscode) is returned next, ahead of the Claude Code projects
+    lookup; see ``pipeline.host.copilot_transcript_for``.
     """
     supplied = _host.transcript_path()
     if supplied:
         return supplied
+    copilot = _host.copilot_transcript_for(session_id or "")
+    if copilot:
+        return copilot
     sdir = _session_dir(project_dir)
     if session_id:
         _validate_session_id(session_id)
