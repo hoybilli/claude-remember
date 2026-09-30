@@ -285,6 +285,15 @@ def _choose_summarizer_provider() -> str:
             "and is falling back to 'claude'"
         )
         return "claude"
+    if envelope == "copilot":
+        # issue: vscode -- same receipt #567 gave Antigravity: a positively
+        # identified non-Claude host billed through `claude -p`.
+        _warn(
+            f"WARNING: transcript {path!r} is a VS Code Agents / Copilot "
+            "session -- REMEMBER_SUMMARIZER=auto has no Copilot-native "
+            "summarizer and is falling back to 'claude'"
+        )
+        return "claude"
     if envelope == "unrecognised":
         # #556: "unreadable or an unrecognised shape" used to be the whole
         # story, but it collapsed a THIRD cause into "unrecognised shape" --
