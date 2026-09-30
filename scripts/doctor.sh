@@ -327,6 +327,8 @@ else
     echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
+_DOCTOR_COPILOT_DIR="${COPILOT_HOME:-${HOME:-}/.copilot}/session-state"
+[ -d "$_DOCTOR_COPILOT_DIR" ] && echo "OK   copilot session-state dir present: $_DOCTOR_COPILOT_DIR (VS Code Agents transcripts resolve from here -- issue: vscode)"
 
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available

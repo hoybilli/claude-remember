@@ -39,3 +39,15 @@ remember_normalize_session_id() {
 remember_session_id_host_hint() {
     case "$1" in agent-host-*:/*) printf 'copilot' ;; *) printf '' ;; esac
 }
+
+# remember_copilot_transcript_for UUID -> prints the Copilot events file if it
+# exists, else nothing. Mirrors pipeline/host.copilot_transcript_for().
+remember_copilot_transcript_for() {
+    case "$1" in
+        ''|.|..|*/*|*\*|*:*) return 1 ;;
+    esac
+    _rc_base="${COPILOT_HOME:-${HOME:-}/.copilot}"
+    _rc_path="${_rc_base%/}/session-state/$1/events.jsonl"
+    [ -f "$_rc_path" ] || return 1
+    printf '%s' "$_rc_path"
+}

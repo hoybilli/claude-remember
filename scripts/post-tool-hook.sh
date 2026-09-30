@@ -504,9 +504,16 @@ NOTICE_TTL=3600
 # stdin did not offer one -- an older CLI, a test harness, a host this
 # module has not been taught yet -- which is exactly the population the
 # existing "no session dir" warning below was already written for.
+COPILOT_TRANSCRIPT=""
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
+elif [ -n "$STDIN_SESSION_ID" ] && COPILOT_TRANSCRIPT=$(remember_copilot_transcript_for "$STDIN_SESSION_ID"); then
+    # issue: vscode -- VS Code Agents / Copilot keeps its transcript under
+    # ~/.copilot/session-state/<uuid>/, never under Claude Code's projects dir.
+    LATEST_JSONL="$COPILOT_TRANSCRIPT"
+    declare -F log >/dev/null 2>&1 && log "hook" "post-tool: copilot transcript $COPILOT_TRANSCRIPT"
 else
+    COPILOT_TRANSCRIPT=""
     LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
 fi
 if [ -z "$LATEST_JSONL" ]; then
@@ -581,6 +588,9 @@ if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # and log a "falling back to newest" line that is not a fallback, just
     # noise on every Codex tool call.
     [ -n "$STDIN_SESSION_ID" ] && STDIN_SESSION_ID_TRUSTED=true
+elif [ -n "$COPILOT_TRANSCRIPT" ]; then
+    # issue: vscode -- resolved from ~/.copilot/session-state/<uuid>/ above.
+    STDIN_SESSION_ID_TRUSTED=true
 elif [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
     STDIN_SESSION_ID_TRUSTED=true
