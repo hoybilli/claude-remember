@@ -409,7 +409,7 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool, bool]:
 
     Returns:
         ``(envelope, unreadable, capped)`` where ``envelope`` is
-        "claude-code", "codex", or "unrecognised".
+        "claude-code", "codex", "copilot", or "unrecognised".
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -453,7 +453,7 @@ def sniff_file_envelope(path: str) -> str:
     as the verdict, up to ``sniff_file_envelope_status()``'s own scan cap --
     see that function's docstring for why skipping is still sound.
 
-    Returns "claude-code", "codex", or "unrecognised" -- the last one also
+    Returns "claude-code", "codex", "copilot", or "unrecognised" -- the last one also
     covering an unreadable file, an entirely-empty file (which offers no
     line to sniff at all), and a scan that gave up at
     ``sniff_file_envelope_status()``'s own cap (#543). Callers that need to
@@ -504,7 +504,8 @@ def extract_messages(
             incremental extraction after a previous save).
         envelope: Which host wrote this transcript -- "claude-code" (the
             default, and the only shape this function understood before
-            #443), "codex", "antigravity" (#563), or "unrecognised".
+            #443), "codex", "antigravity" (#563), "copilot" (VS Code Agents),
+            or "unrecognised".
             Callers determine this once per file via
             ``sniff_file_envelope()``, independent of ``skip_lines``, and
             pass it through here; a per-line resniff would misfire on a
@@ -559,6 +560,12 @@ def extract_messages(
                         stats.get("antigravity_unmapped_steps", 0) + 1
                     )
                 exchange = _host.antigravity_exchange(obj)
+                if exchange is not None:
+                    messages.append(exchange)
+                continue
+
+            if envelope == "copilot":
+                exchange = _host.copilot_exchange(obj)
                 if exchange is not None:
                     messages.append(exchange)
                 continue

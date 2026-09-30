@@ -80,6 +80,7 @@ that have already consumed theirs.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -437,6 +438,67 @@ def antigravity_step_is_unmapped(obj: dict) -> bool:
     """
     step_type = obj.get("type")
     return isinstance(step_type, str) and step_type not in _ANTIGRAVITY_STEP_ROLES
+
+
+def _format_copilot_tool_request(req: dict) -> str:
+    """``[TOOL: name detail]`` for one Copilot ``toolRequests`` entry, in the
+    same shape ``pipeline.extract._format_tool_use`` gives Claude Code's
+    ``tool_use`` blocks, so summaries read alike across hosts.
+
+    ``arguments`` is a dict on a live session but has also been observed as a
+    JSON *string* in tool telemetry -- both are accepted; anything else is
+    treated as no arguments.
+    """
+    name = req.get("name") or "?"
+    args = req.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    path = args.get("path")
+    if isinstance(path, str) and path:
+        return f"[TOOL: {name} {path.replace(chr(92), '/').split('/')[-1]}]"
+    cmd = args.get("command")
+    if isinstance(cmd, str) and cmd:
+        return f"[TOOL: {name} `{cmd[:80]}`]"
+    return f"[TOOL: {name}]"
+
+
+def copilot_exchange(obj: dict) -> tuple[str, str] | None:
+    """``(role, text)`` for one VS Code Agents / Copilot transcript line, or
+    ``None`` to skip it (issue: vscode).
+
+    Only ``user.message`` and ``assistant.message`` carry a turn. A user line
+    is read from ``data.content`` -- never ``data.transformedContent``, which
+    is the same prompt with VS Code's own ``<system_reminder>`` and datetime
+    scaffolding wrapped around it. An assistant line is its ``content`` plus
+    one ``[TOOL: ...]`` line per ``toolRequests`` entry; a tool-only turn
+    (empty content, non-empty requests) is a real turn and is kept.
+    """
+    data = obj.get("data")
+    if not isinstance(data, dict):
+        return None
+    kind = obj.get("type")
+    if kind == "user.message":
+        content = data.get("content")
+        if isinstance(content, str) and content.strip():
+            return "HUMAN", content.strip()
+        return None
+    if kind == "assistant.message":
+        parts: list[str] = []
+        content = data.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip())
+        requests = data.get("toolRequests")
+        if isinstance(requests, list):
+            parts.extend(_format_copilot_tool_request(r) for r in requests if isinstance(r, dict))
+        if not parts:
+            return None
+        return "AGENT", "\n".join(parts)
+    return None
 
 
 def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
