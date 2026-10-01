@@ -404,3 +404,165 @@ def test_commands_parse_under_powershell():
             f"{loc}: PowerShell ParserError\ncmd: {cmd}\n"
             f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Windows PowerShell launcher (issue: vscode)
+#
+# VS Code Agents (Copilot harness) on Windows runs a hook entry's `command`
+# through Windows PowerShell, where a bare `bash` can resolve to the WSL
+# launcher. A sibling `powershell` key on each entry is honoured there and
+# points at scripts/run-hook.ps1, which finds Git Bash explicitly. Claude Code
+# ignores the extra key and keeps using `command`. The functional tests below
+# are OBSERVED on Windows only; that macOS/Linux ignore the `powershell` key is
+# REASONED from the host's documented behaviour, not observed.
+# ---------------------------------------------------------------------------
+
+_HOOK_SCRIPT_NAMES = (
+    "session-start-hook.sh",
+    "user-prompt-hook.sh",
+    "post-tool-hook.sh",
+    "session-end-hook.sh",
+)
+RUN_HOOK_PS1 = SCRIPTS_DIR / "run-hook.ps1"
+
+
+def _iter_entries():
+    """Yield (loc, hook_entry_dict) for every hook entry."""
+    data = json.loads(HOOKS_JSON.read_text())
+    for event, groups in data.get("hooks", {}).items():
+        for gi, group in enumerate(groups):
+            for hi, hook in enumerate(group.get("hooks", [])):
+                yield f"{event}[{gi}].hooks[{hi}]", hook
+
+
+def _script_named_by(command: str) -> str:
+    m = re.search(r"scripts/([A-Za-z0-9_.-]+\.sh)", command)
+    assert m, f"no script in command {command!r}"
+    return m.group(1)
+
+
+def test_every_entry_has_a_powershell_launcher_key():
+    entries = list(_iter_entries())
+    assert len(entries) == len(_HOOK_SCRIPT_NAMES)
+    for loc, hook in entries:
+        name = _script_named_by(hook["command"])
+        expected = f'& "$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}'
+        assert hook["powershell"] == expected, f"{loc}: wrong powershell launcher"
+    assert RUN_HOOK_PS1.is_file(), "scripts/run-hook.ps1 is missing"
+
+
+def test_command_strings_are_unchanged_for_claude_code():
+    """Positive control: the `command` Claude Code (and VS Code on macOS/Linux)
+    runs is byte-for-byte what it was before the `powershell` key existed."""
+    commands = [hook["command"] for _loc, hook in _iter_entries()]
+    assert commands == [
+        f'bash "${{CLAUDE_PLUGIN_ROOT}}/scripts/{name}"' for name in _HOOK_SCRIPT_NAMES
+    ]
+
+
+_PS_EXE = shutil.which("pwsh") or shutil.which("powershell")
+
+
+@pytest.mark.skipif(_PS_EXE is None, reason="no PowerShell on PATH")
+def test_powershell_values_parse_under_powershell():
+    """Each `powershell` value dry-parses (same probe as the `command` check)."""
+    parser_probe = (
+        "$src = [Console]::In.ReadToEnd(); "
+        "$errors = $null; "
+        "$null = [System.Management.Automation.Language.Parser]::ParseInput("
+        "$src, [ref]$null, [ref]$errors); "
+        "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
+    )
+    seen = 0
+    for loc, hook in _iter_entries():
+        seen += 1
+        result = subprocess.run(
+            [_PS_EXE, "-NoProfile", "-NonInteractive", "-Command", parser_probe],
+            input=hook["powershell"] + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 0, (
+            f"{loc}: PowerShell ParserError\ncmd: {hook['powershell']}\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+    assert seen == len(_HOOK_SCRIPT_NAMES)
+
+
+_WIN_POWERSHELL = shutil.which("powershell.exe") if sys.platform == "win32" else None
+_needs_win_launcher = pytest.mark.skipif(
+    sys.platform != "win32" or _WIN_POWERSHELL is None or GIT_BASH is None,
+    reason="Windows PowerShell + Git Bash required (observed on Windows only)",
+)
+_PAYLOAD = '{"hook_event_name":"SessionStart","prompt":"ünï – 日本"}'
+
+
+def _fake_plugin(tmp_path, stubs: dict[str, str]) -> Path:
+    root = tmp_path / "plug in root"  # space on purpose
+    (root / "scripts").mkdir(parents=True)
+    shutil.copyfile(RUN_HOOK_PS1, root / "scripts" / "run-hook.ps1")
+    for name, body in stubs.items():
+        (root / "scripts" / name).write_bytes(("#!/usr/bin/env bash\n" + body).encode("utf-8"))
+    return root
+
+
+def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32=True):
+    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(root).replace("/", "\\")}
+    if path_first_system32:
+        sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        rest = [p for p in env["PATH"].split(os.pathsep) if p.lower() != sys32.lower()]
+        env["PATH"] = os.pathsep.join([sys32, *rest])
+    for key, value in (env_extra or {}).items():
+        # Windows env names are case-insensitive but os.environ upper-cases them:
+        # drop the existing spelling so the override is the only one the child sees.
+        for existing in [k for k in env if k.lower() == key.lower()]:
+            del env[existing]
+        env[key] = value
+    return subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", ps_value],
+        input=_PAYLOAD.encode("utf-8"),
+        capture_output=True,
+        env=env,
+        timeout=120,
+    )
+
+
+@_needs_win_launcher
+def test_powershell_launcher_reaches_script_with_backslash_plugin_root(tmp_path):
+    """Each entry's `powershell` value runs its script under Git Bash even with
+    System32 (WSL bash) first on PATH, a backslash plugin root containing a
+    space, and a non-ASCII UTF-8 payload on stdin. Observed on Windows only."""
+    marker = tmp_path / "marker.txt"
+    stub = 'echo "$(basename "$0")" >> "$REMEMBER_TEST_MARKER"\ncat\n'
+    root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
+    for loc, hook in _iter_entries():
+        result = _run_launcher(
+            root, hook["powershell"], {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")}
+        )
+        assert result.returncode == 0, f"{loc}: {result.stderr!r}"
+        assert "ünï – 日本" in result.stdout.decode("utf-8"), f"{loc}: payload mangled"
+    ran = marker.read_text(encoding="utf-8").split()
+    assert sorted(ran) == sorted(_HOOK_SCRIPT_NAMES)
+
+
+@_needs_win_launcher
+def test_powershell_launcher_forwards_bash_exit_code(tmp_path):
+    """The launcher returns bash's exit code (`-File` form). Also the positive
+    control for the returncode == 0 assertions above: a failing stub is visible.
+
+    Observed: under `powershell -Command "& script.ps1"` (the form the manifest
+    uses) Windows PowerShell 5.1 collapses any non-zero script exit to 1, so
+    the exact code only survives `-File`; non-zero still stays non-zero."""
+    root = _fake_plugin(tmp_path, {"exit3.sh": "cat >/dev/null\nexit 3\n"})
+    launcher = str(root / "scripts" / "run-hook.ps1")
+    direct = subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", launcher, "exit3.sh"],
+        input=b"{}", capture_output=True, timeout=120,
+    )
+    assert direct.returncode == 3, direct.stderr
+    via_command = _run_launcher(root, r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" exit3.sh')
+    assert via_command.returncode != 0, via_command.stderr
