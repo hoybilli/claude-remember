@@ -1,8 +1,8 @@
 {
   "PostToolUse": {
-    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "cwd": "c:\\Users\\user\\proj",
     "hook_event_name": "PostToolUse",
-    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "session_id": "00000000-0000-4000-8000-000000000000",
     "timestamp": "2026-09-30T22:49:03.202Z",
     "tool_input": {
       "command": "Write-Output \"hello\"",
@@ -15,25 +15,25 @@
     }
   },
   "SessionEnd": {
-    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "cwd": "c:\\Users\\user\\proj",
     "hook_event_name": "SessionEnd",
     "reason": "complete",
-    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "session_id": "00000000-0000-4000-8000-000000000000",
     "timestamp": "2026-09-30T22:48:57.369Z"
   },
   "SessionStart": {
-    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "cwd": "c:\\Users\\user\\proj",
     "hook_event_name": "SessionStart",
     "initial_prompt": "PROBE PROMPT (redacted)",
-    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "session_id": "00000000-0000-4000-8000-000000000000",
     "source": "new",
     "timestamp": "2026-09-30T22:48:55.034Z"
   },
   "UserPromptSubmit": {
-    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "cwd": "c:\\Users\\user\\proj",
     "hook_event_name": "UserPromptSubmit",
     "prompt": "PROBE PROMPT (redacted)",
-    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "session_id": "00000000-0000-4000-8000-000000000000",
     "timestamp": "2026-09-30T22:48:49.044Z"
   }
 }

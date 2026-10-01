@@ -7,8 +7,10 @@ Neither Claude Code's (`message`/`type` in user|assistant|...), Codex's
 (`payload`) nor Antigravity's (`step_index`/`source`) reader can place it.
 
 Fixture tests/fixtures/vscode-events.jsonl is a trimmed, sanitized copy of a
-real session captured 2026-09-06 on Windows 11 / VS Code 1.139.1, sanitized 2026-09-30 -- not
-constructed.
+real session's events.jsonl -- not constructed. What the fixture itself
+records: its `session.start` is dated 2026-09-06 with `producer: copilot-agent`
+and `copilotVersion: 1.0.81-0`, and its paths are Windows paths. It records no
+VS Code or OS version, so none is claimed here. Sanitized 2026-09-30.
 """
 from __future__ import annotations
 

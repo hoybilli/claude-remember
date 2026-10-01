@@ -53,10 +53,10 @@ def _run(tmp_path, session_id, extra_env=None, recent="PROBE-RECENT-LINE\n"):
 
 def _assert_envelope(out):
     obj = json.loads(out)
+    # Exact shape: the one top-level key VS Code was observed to inject.
+    assert set(obj) == {"additionalContext"}
     assert "PROBE-RECENT-LINE" in obj["additionalContext"]
     assert "=== MEMORY ===" in obj["additionalContext"]
-    assert "hookSpecificOutput" not in obj
-    assert "systemMessage" not in obj
     return obj
 
 

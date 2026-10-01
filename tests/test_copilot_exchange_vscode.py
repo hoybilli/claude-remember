@@ -30,13 +30,43 @@ def test_user_message_is_human_and_uses_content_not_transformed():
     assert "<system_reminder>" in obj["data"].get("transformedContent", "")
 
 
-def test_assistant_message_with_text_and_tools():
+def test_fixture_tool_request_turn_yields_tool_lines():
+    """The fixture's assistant turns carry empty `content`: this covers the
+    tool lines only (prose is covered by the constructed cases below)."""
     obj = next(o for o in _by_type("assistant.message") if o["data"].get("toolRequests"))
     role, text = _host.copilot_exchange(obj)
     assert role == "AGENT"
     assert "[TOOL: " in text
     name = obj["data"]["toolRequests"][0]["name"]
     assert f"[TOOL: {name}" in text
+
+
+def _constructed_assistant(content, tool_requests):
+    """An `assistant.message` record CONSTRUCTED for this test, shaped like the
+    fixture's records (same keys), because every assistant line in the captured
+    fixture has an empty `content`."""
+    return {
+        "type": "assistant.message",
+        "data": {"messageId": "m-1", "model": "example-model", "content": content,
+                 "toolRequests": tool_requests, "turnId": "1"},
+        "id": "e-1", "timestamp": "2026-09-06T18:07:51.300Z", "parentId": "p-1",
+    }
+
+
+def test_assistant_prose_and_tool_line_both_appear_in_order():
+    obj = _constructed_assistant(
+        "  I will read the README first.  ",
+        [{"toolCallId": "c1", "name": "view", "type": "function",
+          "arguments": {"path": "c:\\Users\\user\\proj\\README.md"}}],
+    )
+    role, text = _host.copilot_exchange(obj)
+    assert role == "AGENT"
+    assert text == "I will read the README first.\n[TOOL: view README.md]"
+
+
+def test_assistant_prose_only_is_kept():
+    obj = _constructed_assistant("The answer is 42.", [])
+    assert _host.copilot_exchange(obj) == ("AGENT", "The answer is 42.")
 
 
 def test_assistant_message_tool_only_still_yields_agent_line():

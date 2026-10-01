@@ -28,7 +28,7 @@ def home(tmp_path, monkeypatch):
 
 def _make_copilot(home, uuid):
     d = home / ".copilot" / "session-state" / uuid
-    d.mkdir(parents=True)
+    d.mkdir(parents=True, exist_ok=True)
     p = d / "events.jsonl"
     p.write_text('{"type":"session.start","data":{}}\n', encoding="utf-8")
     return p
@@ -58,9 +58,27 @@ def test_absent_file_falls_through_to_claude_lookup(home):
 
 
 def test_non_uuid_ids_never_touch_session_state(home):
-    _make_copilot(home, "..")  # a hostile directory that must never be joined
-    for bad in ("", "..", "agent-host-copilotcli:/" + UUID, "not-a-uuid", UUID + "/x"):
-        assert _host.copilot_transcript_for(bad) is None
+    """Every decoy sits exactly where a joined bad id would land, so a missing
+    uuid check would return it. Built from plain names only: no `..` component
+    is ever passed to mkdir (POSIX raises FileExistsError on
+    `session-state/..`; Windows collapses it lexically)."""
+    state = home / ".copilot" / "session-state"
+    state.mkdir(parents=True)
+    decoy = '{"type":"session.start","data":{}}\n'
+    # "" and "." -> session-state/events.jsonl; ".." -> .copilot/events.jsonl
+    (state / "events.jsonl").write_text(decoy, encoding="utf-8")
+    (home / ".copilot" / "events.jsonl").write_text(decoy, encoding="utf-8")
+    # a pre-existing non-uuid session directory
+    (state / "not-a-uuid").mkdir()
+    (state / "not-a-uuid" / "events.jsonl").write_text(decoy, encoding="utf-8")
+    # uuid + "/x" -> session-state/<uuid>/x/events.jsonl
+    (state / UUID / "x").mkdir(parents=True)
+    (state / UUID / "x" / "events.jsonl").write_text(decoy, encoding="utf-8")
+    for bad in ("", ".", "..", "agent-host-copilotcli:/" + UUID, "not-a-uuid", UUID + "/x"):
+        assert _host.copilot_transcript_for(bad) is None, bad
+    # Positive control: the same tree with a real uuid session resolves.
+    p = _make_copilot(home, UUID)
+    assert _host.copilot_transcript_for(UUID) == str(p)
 
 
 def test_supplied_transcript_path_still_wins(home, monkeypatch):
