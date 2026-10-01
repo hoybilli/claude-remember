@@ -52,17 +52,28 @@ followed by **Developer: Reload Window**. The settings route is the one **observ
 
 ## Verification
 
-Filled in from a later live run.
+**Observed** on 2026-09-30 (Windows 11, Git for Windows bash 5.2.37, Windows PowerShell 5.1): three agent sessions on the Copilot harness, run against an existing project that already had a `.remember/` directory written by Claude Code. The plugin was a `git archive` export (LF line endings) of commit 39d1610, registered through `chat.pluginLocations` and followed by a window reload; VS Code ran the hooks from its mirror under `%APPDATA%\Code\agentPlugins\`. The earlier probes were recorded against VS Code 1.139.1; `code --version` reported 1.140.0 when these sessions ran, and the running window's version was not separately confirmed.
 
 | Event | Fired | Notes |
 | --- | --- | --- |
-| SessionStart | | |
-| UserPromptSubmit | | |
-| PostToolUse | | |
-| SessionEnd | | |
+| SessionStart | yes | Fired once per session. The harness recorded the output as `{"additionalContext": ...}` of 5,780 characters, and the model's first reply listed the day file, `now.md`, `recent.md`, `archive.md`, the last handoff and the history note, so the recap reached the model. Hook log: `session-start took 2s`. |
+| UserPromptSubmit | yes | Fired on every turn and exited successfully. Its output does not reach the model on this host (see Known gaps). |
+| PostToolUse | yes | Fired once per tool call (twice in session 3). Log line: `post-tool: copilot transcript .../.copilot/session-state/<uuid>/events.jsonl`. |
+| SessionEnd | yes | Fired after every turn, not once per session, always with `reason=complete` (see Known gaps). Each firing ran the forced save: `extract`, then the summarizer (`provider: claude`), then a position update. |
+
+End to end (**observed**):
+
+- **Recap injected.** In session 1 the model could name the memory sections from the SessionStart context alone.
+- **Save written to the shared timeline.** In session 3, one turn that created a small file in the project: `extract` found 4 exchanges (1 human), the summarizer returned an entry (`[write] appended (provider: claude): ## 21:21 | master`), the position advanced (`[write] position -> 34`), and the regular compression step moved the entry from `now.md` into the day file (`now.md -> today-2026-09-30.md`, `752->360b`). The day file holds a one-line entry naming the file that session created. This is the first observation of a VS Code Agents session being summarised into the same `.remember/` timeline Claude Code uses.
+- **`scripts/doctor.sh`** run against the project afterwards: `VERDICT: capture is working -- last save 2026-09-30 21:13:09`.
+- **Two sessions were SKIPped by the summarizer.** Session 1 (a question about the memory sections, then a command printing `hello`) and session 2 (one read-only turn that read the README and summarised it) each extracted correctly (session 2: 3 exchanges, with the tool-only assistant turn rendered as a `[TOOL: ...]` line) and the position advanced, but the summarizer returned `SKIP` and nothing was written to `now.md`. The save prompt tells the model to return `SKIP` for a span with no substantive work, and it treated these that way (**observed** that it did; the reading that this is the prompt's intended judgement and not a capture failure is **reasoned**, from the prompt text and from session 3 writing normally).
+
+Not observed: macOS, Linux, the standalone Copilot CLI, and any session shape beyond these three.
 
 ## Known gaps
 
+- **SessionEnd fires after every turn on this host** (**observed**, `reason=complete`), not once per session. Each firing runs the forced save, which bypasses the cooldown and minimum-message gates, so the summarizer is called once per turn; the observed cost was roughly half a cent to seven tenths of a cent per call. Saves are incremental (**observed**: the position advances between firings and nothing was duplicated), but the per-turn call is a cost and latency difference from Claude Code. Not changed in this version.
+- The harness reports the merged SessionStart result as failed (`success=false`) when any other installed plugin's SessionStart hook fails (**observed**: another plugin's hook failed under PowerShell in every session); this plugin's context was still injected.
 - UserPromptSubmit output does not reach the model on this host (**observed**: neither a `hookSpecificOutput` nor a top-level `additionalContext` from the plugin's UserPromptSubmit hook was injected). Whatever `scripts/user-prompt-hook.sh` prints is therefore not seen by the model here.
 - Promos (`systemMessage`) are not emitted on this host; the emit branch skips them on purpose, as `systemMessage` was not probed.
 - Under `powershell -Command`, Windows PowerShell 5.1 reports any non-zero script exit as 1 (**observed**); the hook scripts exit 0 on every path, so this only matters when diagnosing a failure.
