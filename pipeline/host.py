@@ -18,8 +18,11 @@ teaching this module a fourth column here:
     | plugin-root env var | `CLAUDE_PLUGIN_ROOT` | `PLUGIN_ROOT` (+ `CLAUDE_*` alias) | none documented |
     | project-dir env var | `CLAUDE_PROJECT_DIR` | `CLAUDE_PROJECT_DIR` (compat alias) | `CLAUDE_PROJECT_DIR` (compat alias, #456) |
 
-A fifth shape, VS Code Agents (GitHub Copilot harness), has no column either: it is
-recognised only by its transcript envelope (`sniff_envelope` -> `"copilot"`).
+A fifth shape, VS Code Agents (GitHub Copilot harness), has no column in that
+table either, but it does have a `COPILOT` row below: its signature comes from
+`tests/fixtures/vscode-env-vscode.txt`, dumped from inside a real firing hook,
+and its transcripts are also recognised by envelope (`sniff_envelope` ->
+`"copilot"`).
 
 The stdin payload is the only part all three arrived at independently. The
 environment is the parochial part: Codex's `CLAUDE_PLUGIN_ROOT` is a
@@ -182,6 +185,37 @@ ANTIGRAVITY = Host(
     signature_vars=("ANTIGRAVITY_CONVERSATION_ID",),
 )
 
+# VS Code Agents -- the GitHub Copilot harness embedded in VS Code (issue:
+# vscode). Observed live (VS Code 1.139.1, Windows 11, Windows PowerShell 5.1,
+# 2026-09-30, env dumped from inside a firing plugin hook; see
+# tests/fixtures/vscode-env-vscode.txt):
+#   - the hook's stdin is Claude-shaped snake_case JSON, but `session_id` is a
+#     bare uuid on this path (not `agent-host-copilotcli:/<uuid>`) and there is
+#     no `transcript_path` key;
+#   - three plugin-root variables are exported with the same value (a
+#     backslash path): CLAUDE_PLUGIN_ROOT, COPILOT_PLUGIN_ROOT and PLUGIN_ROOT;
+#   - CLAUDE_PROJECT_DIR is set, and COPILOT_PROJECT_DIR carries the same value;
+#   - host-specific exports exist: COPILOT_CLI=1, COPILOT_PLUGIN_ROOT,
+#     COPILOT_PROJECT_DIR, COPILOT_HOME, AI_AGENT=github_copilot_vscode_agent.
+# plugin_root_vars is CLAUDE_PLUGIN_ROOT only: COPILOT_PLUGIN_ROOT and PLUGIN_ROOT
+# were observed carrying the same value, so the one name already shared with the
+# shell side (scripts/resolve-paths.sh, pinned by test_host_shell_parity) is
+# enough. COPILOT_PLUGIN_ROOT stays a signature variable only.
+# The signature is COPILOT_CLI / COPILOT_PLUGIN_ROOT: both are exported by the
+# harness itself and by nothing else. NOT COPILOT_HOME (#463's lesson): that is
+# a configuration path a user may set for any reason, so it would misfire under
+# a Claude Code session that merely has it set. CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP
+# also appears in the capture but is not a Claude Code signature variable (those
+# are CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_SESSION_ID), so detection ignores it.
+# That the standalone Copilot CLI runs the same harness, and so looks the same,
+# is reasoned from the COPILOT_CLI name, not observed.
+COPILOT = Host(
+    name="copilot",
+    plugin_root_vars=("CLAUDE_PLUGIN_ROOT",),
+    project_dir_vars=("CLAUDE_PROJECT_DIR", "COPILOT_PROJECT_DIR"),
+    signature_vars=("COPILOT_CLI", "COPILOT_PLUGIN_ROOT"),
+)
+
 # The fallback. Not an error: a host we do not recognise still delivers the
 # payload, and the payload is the part that matters.
 UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
@@ -223,7 +257,7 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 # longer wired to the one decision it used to gate. If a consumer that needs
 # env-based host identification is ever added back, this is the point to
 # revisit AMBIGUOUS, not before.
-REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX, ANTIGRAVITY)
+REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX, ANTIGRAVITY, COPILOT)
 
 # Every plugin-root variable any known host uses, in registry precedence order,
 # de-duplicated. scripts/resolve-paths.sh mirrors this list by hand and

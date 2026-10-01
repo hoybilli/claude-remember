@@ -1,0 +1,39 @@
+{
+  "PostToolUse": {
+    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "hook_event_name": "PostToolUse",
+    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "timestamp": "2026-09-30T22:49:03.202Z",
+    "tool_input": {
+      "command": "Write-Output \"hello\"",
+      "description": "Print the word hello"
+    },
+    "tool_name": "Bash",
+    "tool_result": {
+      "result_type": "success",
+      "text_result_for_llm": "hello\n<shellId: 3 completed with exit code 0>"
+    }
+  },
+  "SessionEnd": {
+    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "hook_event_name": "SessionEnd",
+    "reason": "complete",
+    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "timestamp": "2026-09-30T22:48:57.369Z"
+  },
+  "SessionStart": {
+    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "hook_event_name": "SessionStart",
+    "initial_prompt": "PROBE PROMPT (redacted)",
+    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "source": "new",
+    "timestamp": "2026-09-30T22:48:55.034Z"
+  },
+  "UserPromptSubmit": {
+    "cwd": "c:\\Users\\user\\cbc-markdown",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "PROBE PROMPT (redacted)",
+    "session_id": "3beeabae-423a-4a5e-b58b-9bdb8e3aa0b9",
+    "timestamp": "2026-09-30T22:48:49.044Z"
+  }
+}
