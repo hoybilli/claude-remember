@@ -185,10 +185,13 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     (plugin / "pipeline" / "__init__.py").write_text("")
     (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
+    # lib-session-id.sh: not used by save-session.sh itself, but the hooks
+    # that callers wire into this same sandbox (_wire_hook in
+    # test_session_end_hook_345.py) source it (issue: vscode).
     for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
                    "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
-                   "lib-clock.sh"):
+                   "lib-clock.sh", "lib-session-id.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
 
     cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},

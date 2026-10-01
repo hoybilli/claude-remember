@@ -229,8 +229,9 @@ class TestFailSoftContract:
         missing-data-dir case the acceptance criteria name."""
         plugin_scripts = tmp_path / "plugin" / "scripts"
         plugin_scripts.mkdir(parents=True)
-        for script in ("lib-clock.sh", "resolve-paths.sh", "detect-tools.sh",
-                       "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh"):
+        for script in ("lib-clock.sh", "lib-session-id.sh", "resolve-paths.sh",
+                       "detect-tools.sh", "bootstrap-dirs.sh", "log.sh",
+                       "lib-memory-dir.sh"):
             shutil.copyfile(REPO_ROOT / "scripts" / script, plugin_scripts / script)
         hook = plugin_scripts / HOOK_NAME
         shutil.copyfile(REPO_ROOT / "scripts" / HOOK_NAME, hook)
