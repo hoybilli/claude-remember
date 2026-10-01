@@ -442,12 +442,20 @@ def _script_named_by(command: str) -> str:
     return m.group(1)
 
 
+# The exact `powershell` value: a child Windows PowerShell with its own
+# `-ExecutionPolicy Bypass`, so a Restricted/RemoteSigned user policy on the
+# shell VS Code starts cannot block the launcher, and `exit $LASTEXITCODE`
+# so bash's exact status survives (`-Command "& x.ps1"` collapses it to 1).
+_PS_VALUE = ('powershell -NoProfile -ExecutionPolicy Bypass -File '
+             '"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}; exit $LASTEXITCODE')
+
+
 def test_every_entry_has_a_powershell_launcher_key():
     entries = list(_iter_entries())
     assert len(entries) == len(_HOOK_SCRIPT_NAMES)
     for loc, hook in entries:
         name = _script_named_by(hook["command"])
-        expected = f'& "$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}'
+        expected = _PS_VALUE.format(name=name)
         assert hook["powershell"] == expected, f"{loc}: wrong powershell launcher"
     assert RUN_HOOK_PS1.is_file(), "scripts/run-hook.ps1 is missing"
 
@@ -508,8 +516,18 @@ def _fake_plugin(tmp_path, stubs: dict[str, str]) -> Path:
     return root
 
 
-def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32=True):
-    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(root).replace("/", "\\")}
+# Launcher inputs the developer's own shell may carry (this suite runs inside
+# a Claude Code session): every launcher run starts without them and only gets
+# back what a case names.
+_LAUNCHER_AMBIENT = ("CLAUDE_PLUGIN_ROOT", "COPILOT_PLUGIN_ROOT", "REMEMBER_BASH")
+
+
+def _launcher_env(root: Path | None, env_extra=None, path_first_system32=True,
+                  drop=()):
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() not in _LAUNCHER_AMBIENT + tuple(d.upper() for d in drop)}
+    if root is not None:
+        env["CLAUDE_PLUGIN_ROOT"] = str(root).replace("/", "\\")
     if path_first_system32:
         sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
         rest = [p for p in env["PATH"].split(os.pathsep) if p.lower() != sys32.lower()]
@@ -520,13 +538,27 @@ def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32
         for existing in [k for k in env if k.lower() == key.lower()]:
             del env[existing]
         env[key] = value
+    return env
+
+
+def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32=True,
+                  policy="Bypass"):
     return subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", policy,
          "-Command", ps_value],
         input=_PAYLOAD.encode("utf-8"),
         capture_output=True,
-        env=env,
+        env=_launcher_env(root, env_extra, path_first_system32),
         timeout=120,
+    )
+
+
+def _run_launcher_file(root: Path, script: str, env):
+    """The launcher alone, via `-File` (what the manifest's child shell runs)."""
+    return subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(root / "scripts" / "run-hook.ps1"), script],
+        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120,
     )
 
 
@@ -550,19 +582,144 @@ def test_powershell_launcher_reaches_script_with_backslash_plugin_root(tmp_path)
 
 @_needs_win_launcher
 def test_powershell_launcher_forwards_bash_exit_code(tmp_path):
-    """The launcher returns bash's exit code (`-File` form). Also the positive
-    control for the returncode == 0 assertions above: a failing stub is visible.
-
-    Observed: under `powershell -Command "& script.ps1"` (the form the manifest
-    uses) Windows PowerShell 5.1 collapses any non-zero script exit to 1, so
-    the exact code only survives `-File`; non-zero still stays non-zero."""
+    """bash's exact exit code survives both the launcher alone (`-File`) and
+    the manifest form (child `powershell -File ...; exit $LASTEXITCODE`). Also
+    the positive control for the returncode == 0 assertions elsewhere: a
+    failing stub is visible. Observed on Windows only."""
     root = _fake_plugin(tmp_path, {"exit3.sh": "cat >/dev/null\nexit 3\n"})
-    launcher = str(root / "scripts" / "run-hook.ps1")
-    direct = subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", launcher, "exit3.sh"],
-        input=b"{}", capture_output=True, timeout=120,
-    )
+    direct = _run_launcher_file(root, "exit3.sh", _launcher_env(root))
     assert direct.returncode == 3, direct.stderr
-    via_command = _run_launcher(root, r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" exit3.sh')
-    assert via_command.returncode != 0, via_command.stderr
+    via_manifest = _run_launcher(root, _PS_VALUE.format(name="exit3.sh"))
+    assert via_manifest.returncode == 3, via_manifest.stderr
+
+
+@_needs_win_launcher
+def test_manifest_values_run_under_restricted_execution_policy(tmp_path):
+    """Windows' client default policy is `Restricted`, which refuses to load any
+    .ps1. Each manifest value, run by a shell started with `-ExecutionPolicy
+    Restricted`, must still reach its script and hand it the stdin payload
+    byte-for-byte (non-ASCII included). Observed on Windows only, with the
+    policy simulated on the outer shell's command line."""
+    out_dir = tmp_path / "stdin-seen"
+    out_dir.mkdir()
+    stub = 'cat > "$REMEMBER_TEST_OUT/$(basename "$0").stdin"\n'
+    root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
+    for loc, hook in _iter_entries():
+        result = _run_launcher(
+            root, hook["powershell"],
+            {"REMEMBER_TEST_OUT": str(out_dir).replace("\\", "/")}, policy="Restricted",
+        )
+        assert result.returncode == 0, f"{loc}: {result.stderr!r}"
+        name = _script_named_by(hook["command"])
+        seen = (out_dir / f"{name}.stdin").read_bytes()
+        assert seen.rstrip(b"\r\n") == _PAYLOAD.encode("utf-8"), f"{loc}: {seen!r}"
+
+
+@_needs_win_launcher
+def test_restricted_policy_blocks_a_direct_script_call(tmp_path):
+    """Positive control for the test above: the same simulated policy really
+    does refuse a `& script.ps1` call, so passing above is not vacuous."""
+    root = _fake_plugin(tmp_path, {"probe.sh": "cat >/dev/null\n"})
+    result = _run_launcher(root, r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh',
+                           policy="Restricted")
+    assert result.returncode != 0
+    assert b"PSSecurityException" in result.stderr or b"disabled" in result.stderr
+
+
+def _marker_stub():
+    return 'echo ran >> "$REMEMBER_TEST_MARKER"\ncat >/dev/null\n'
+
+
+@_needs_win_launcher
+def test_launcher_with_empty_localappdata_still_exits_zero(tmp_path):
+    """With LOCALAPPDATA unset, the launcher must not die on its own lookup:
+    it reaches Git under ProgramFiles when it is installed there (this run's
+    machine) and exits 0 either way. Observed on Windows only."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")},
+                        drop=("LOCALAPPDATA",))
+    result = _run_launcher_file(root, "probe.sh", env)
+    assert result.returncode == 0, result.stderr
+    git_under_pf = any(
+        os.path.isfile(os.path.join(os.environ.get(v, ""), "Git", "bin", "bash.exe"))
+        for v in ("ProgramFiles", "ProgramFiles(x86)") if os.environ.get(v))
+    if git_under_pf:
+        assert marker.is_file(), result.stderr
+
+
+@_needs_win_launcher
+def test_launcher_falls_through_a_missing_remember_bash(tmp_path):
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
+                               "REMEMBER_BASH": str(tmp_path / "no-such" / "bash.exe")})
+    result = _run_launcher_file(root, "probe.sh", env)
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file(), result.stderr
+
+
+@_needs_win_launcher
+def test_launcher_error_exits_zero(tmp_path):
+    """A terminating error inside the launcher (here: the bash it picked is not
+    an executable) is reported on stderr and exits 0, never non-zero."""
+    bogus = tmp_path / "bogus" / "bash.exe"
+    bogus.parent.mkdir()
+    bogus.write_text("not a program", encoding="utf-8")
+    root = _fake_plugin(tmp_path, {"probe.sh": "cat >/dev/null\n"})
+    result = _run_launcher_file(root, "probe.sh", _launcher_env(root, {"REMEMBER_BASH": str(bogus)}))
+    assert result.returncode == 0, result.stderr
+    assert b"claude-remember: launcher error" in result.stderr
+
+
+def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):
+    """Run the launcher where only its PATH lookup can find bash. PATH holds a
+    fake `bash.exe` (not a program) ahead of Git's. ProgramFiles cannot be
+    overridden through the child's environment block (Windows recomputes it at
+    process start -- observed), so the three base directories are reassigned
+    inside the PowerShell process and the launcher is called in that process."""
+    empty = tmp_path / "empty"
+    empty.mkdir(exist_ok=True)
+    fake = tmp_path / fake_dir_name
+    fake.mkdir()
+    (fake / "bash.exe").write_text("not a program", encoding="utf-8")
+    git_bin = str(Path(GIT_BASH).parent)
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    env = _launcher_env(root, {
+        "REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
+        "PATH": os.pathsep.join([str(fake), git_bin, sys32]),
+    }, path_first_system32=False)
+    launcher = root / "scripts" / "run-hook.ps1"
+    command = (
+        f"$env:ProgramFiles = '{empty}'; ${{env:ProgramFiles(x86)}} = '{empty}'; "
+        f"$env:LOCALAPPDATA = '{empty}'; "
+        f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
+    )
+    return subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", command],
+        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120,
+    )
+
+
+@_needs_win_launcher
+def test_path_lookup_skips_the_windowsapps_alias(tmp_path):
+    """A `bash.exe` under a WindowsApps directory (the Store WSL alias) is
+    skipped like System32's. Observed on Windows only."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    result = _run_path_lookup_only(tmp_path, root, "WindowsApps", marker)
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file(), result.stderr
+
+
+@_needs_win_launcher
+def test_path_lookup_takes_the_first_bash_otherwise(tmp_path):
+    """Positive control: the same layout under a neutral directory name picks
+    the fake first, so the stub does not run -- the exclusion above is what
+    made the difference."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    result = _run_path_lookup_only(tmp_path, root, "SomeTools", marker)
+    assert not marker.exists()
+    assert result.returncode == 0, result.stderr
