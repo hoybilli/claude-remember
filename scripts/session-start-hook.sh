@@ -2538,10 +2538,10 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # probed, and since no promo is shown no marker is written, so nothing is
     # burned.
     if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && command -v jq >/dev/null 2>&1; then
-        _REMEMBER_HOST_JSON=$($JQ -Rs '{additionalContext:.}'             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_HOST_JSON=""
+        _REMEMBER_HOST_JSON=$($JQ -Rs '{additionalContext:.}' \
+            < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_HOST_JSON=""
         if [ -n "$_REMEMBER_HOST_JSON" ]; then
-            printf '%s
-' "$_REMEMBER_HOST_JSON"
+            printf '%s\n' "$_REMEMBER_HOST_JSON"
         else
             cat "$_REMEMBER_CTX_FILE"
         fi

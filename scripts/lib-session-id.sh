@@ -50,7 +50,8 @@ remember_normalize_session_id() {
 # not a signature (#463).
 remember_session_id_host_hint() {
     case "$1" in agent-host-*:/*) printf 'copilot'; return 0 ;; esac
-    if [ -z "${CLAUDE_CODE_ENTRYPOINT:-}" ] && [ -z "${CLAUDE_CODE_SESSION_ID:-}" ]         && { [ -n "${COPILOT_CLI:-}" ] || [ -n "${COPILOT_PLUGIN_ROOT:-}" ]; }; then
+    if [ -z "${CLAUDE_CODE_ENTRYPOINT:-}" ] && [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] \
+        && { [ -n "${COPILOT_CLI:-}" ] || [ -n "${COPILOT_PLUGIN_ROOT:-}" ]; }; then
         printf 'copilot'
     fi
     return 0
