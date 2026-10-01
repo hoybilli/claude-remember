@@ -2523,7 +2523,29 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # through, byte-for-byte -- the common case, and the one that must never
     # regress. `cat`, never `$(cat …)`, so a trailing blank line the old
     # direct-print path always produced is not silently trimmed here.
-    if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
+    #
+    # VS Code Agents (REMEMBER_HOST_HINT=copilot) comes first. Observed on
+    # VS Code 1.139.1 / Windows 11 (macOS/Linux reasoned, not run): a
+    # SessionStart hook's stdout reaches the model only as JSON with a
+    # TOP-LEVEL `additionalContext`; the Claude Code `hookSpecificOutput`
+    # wrapper and plain text did not. Caveat: those three shapes came from
+    # three commands in one hook entry, `hookSpecificOutput` first, so
+    # "unsupported" cannot be told from "a later command's JSON won" -- the
+    # top-level shape is the one proven to inject. The buffer is the exact
+    # plain-text recap Claude Code gets, only wrapped. A jq failure falls back
+    # to the plain buffer, so the hook never costs the context it wraps.
+    # Promos are skipped on this host on purpose: `systemMessage` was not
+    # probed, and since no promo is shown no marker is written, so nothing is
+    # burned.
+    if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && command -v jq >/dev/null 2>&1; then
+        _REMEMBER_HOST_JSON=$($JQ -Rs '{additionalContext:.}'             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_HOST_JSON=""
+        if [ -n "$_REMEMBER_HOST_JSON" ]; then
+            printf '%s
+' "$_REMEMBER_HOST_JSON"
+        else
+            cat "$_REMEMBER_CTX_FILE"
+        fi
+    elif [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
         _REMEMBER_PROMO_JSON=$($JQ -Rs --arg msg "$PROMO_MSG" \
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
