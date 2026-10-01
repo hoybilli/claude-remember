@@ -181,8 +181,9 @@ _stdin_json_string() {
 }
 
 _RAW_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
-STDIN_SESSION_ID=$(remember_normalize_session_id "$_RAW_SESSION_ID")   # issue: vscode
-REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$_RAW_SESSION_ID"); export REMEMBER_HOST_HINT
+remember_session_id_resolve "$_RAW_SESSION_ID"   # issue: vscode -- no fork (#511)
+STDIN_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
+REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
 unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename — same validation
 # post-tool-hook.sh applies before this id becomes a path component or an

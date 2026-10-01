@@ -293,8 +293,10 @@ _stdin_session_id() {
 _RAW_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
 # issue: vscode -- VS Code Agents prefixes the uuid (`agent-host-copilotcli:/`);
 # strip it before the allowlist below, which correctly rejects `:` and `/`.
-CURRENT_SESSION_ID=$(remember_normalize_session_id "$_RAW_SESSION_ID")
-REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$_RAW_SESSION_ID"); export REMEMBER_HOST_HINT
+# The resolver sets globals instead of forking two $(...) (#511).
+remember_session_id_resolve "$_RAW_SESSION_ID"
+CURRENT_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
+REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
 unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename. This is compared against
 # names taken off the transcript directory, and `..` would match nothing
@@ -2536,7 +2538,11 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # to the plain buffer, so the hook never costs the context it wraps.
     # Promos are skipped on this host on purpose: `systemMessage` was not
     # probed, and since no promo is shown no marker is written, so nothing is
-    # burned.
+    # burned. Without jq the recap falls through to plain text, which this
+    # host does not inject -- logged, so that silence is diagnosable.
+    if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && ! command -v jq >/dev/null 2>&1; then
+        log "hook" "session-start: copilot host without jq -- recap printed as plain text, which this host does not inject"
+    fi
     if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && command -v jq >/dev/null 2>&1; then
         _REMEMBER_HOST_JSON=$($JQ -Rs '{additionalContext:.}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_HOST_JSON=""

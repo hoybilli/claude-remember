@@ -83,6 +83,46 @@ def test_claude_code_signature_beats_copilot_env(tmp_path):
     _assert_plain(_run(tmp_path, UUID, {"COPILOT_CLI": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}))
 
 
+_NO_JQ_LOG = "copilot host without jq"
+
+
+def _path_without_jq():
+    """PATH minus every directory holding jq, or None when jq shares a
+    directory with the coreutils the hook needs (typical on Linux/macOS,
+    where jq is in /usr/bin) -- it cannot be hidden there."""
+    kept = []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d and any(os.path.isfile(os.path.join(d, n)) for n in ("jq", "jq.exe")):
+            if any(os.path.isfile(os.path.join(d, n)) for n in ("cat", "cat.exe")):
+                return None
+            continue
+        kept.append(d)
+    return os.pathsep.join(kept)
+
+
+def _logs(tmp_path):
+    return "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                     for p in (tmp_path / "proj" / ".remember" / "logs").glob("*.log"))
+
+
+def test_copilot_without_jq_logs_why_nothing_is_injected(tmp_path):
+    path = _path_without_jq()
+    if path is None:
+        pytest.skip("jq shares a PATH directory with coreutils; cannot hide it")
+    out = _run(tmp_path, UUID, {"COPILOT_CLI": "1", "PATH": path})
+    _assert_plain(out)
+    assert _NO_JQ_LOG in _logs(tmp_path)
+
+
+def test_copilot_with_jq_does_not_log_the_no_jq_line(tmp_path):
+    """Negative half; the positive is the no-jq case above. Also asserts the
+    log was written at all, so an empty log cannot pass this vacuously."""
+    _assert_envelope(_run(tmp_path, UUID, {"COPILOT_CLI": "1"}))
+    logs = _logs(tmp_path)
+    assert "session-start" in logs
+    assert _NO_JQ_LOG not in logs
+
+
 def test_non_ascii_recap_survives_the_envelope(tmp_path):
     out = _run(tmp_path, UUID, {"COPILOT_CLI": "1"},
                recent="PROBE-RECENT-LINE\nünï – 日本\n")

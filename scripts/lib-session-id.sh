@@ -16,50 +16,85 @@
 # before the validator, and the validator is left exactly as it was.
 #
 # Only the `agent-host-<tag>:/<rest>` shape is rewritten. Anything else is
-# printed unchanged and left for the validator to judge.
+# passed through unchanged and left for the validator to judge.
 #
-# Both helpers are pure (print-only, no side effects): callers run them inside
-# $(...), where an export would be lost in the subshell. Each caller sets and
-# exports REMEMBER_HOST_HINT itself from remember_session_id_host_hint. The
-# hint is a logging/dispatch hint only -- never a path input.
+# Two entry points, one rule. The hooks call the no-fork form,
+# remember_session_id_resolve, which sets REMEMBER_SESSION_ID_NORMALIZED and
+# REMEMBER_SESSION_ID_HINT in the caller's own shell: post-tool-hook.sh runs on
+# every tool call, and each $(...) is a fork that docs/windows.md (#511)
+# measured as slow on Git Bash. The print forms (remember_normalize_session_id,
+# remember_session_id_host_hint) are kept for callers that want a value inside
+# $(...); they are implemented on top of the resolver, so they set the same two
+# globals as a side effect -- harmless inside $(...), where the subshell
+# discards them. Each hook sets and exports REMEMBER_HOST_HINT itself. The hint
+# is a logging/dispatch hint only -- never a path input.
 #
 # USAGE
 #   source "$_HOOK_DIR/lib-session-id.sh"
+#   remember_session_id_resolve "$raw"
+#   id=$REMEMBER_SESSION_ID_NORMALIZED
+#   REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
+# or, where a fork does not matter:
 #   id=$(remember_normalize_session_id "$raw")
 #   REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$raw"); export REMEMBER_HOST_HINT
 #
-# Bash 3.2 safe: parameter expansion only, no regex, no arrays.
+# Bash 3.2 safe: parameter expansion and `case` only, no regex, no arrays,
+# no printf -v.
 # ============================================================================
 
-# remember_normalize_session_id RAW -> prints the id to use
-remember_normalize_session_id() {
-    case "$1" in
-        agent-host-*:/*) printf '%s' "${1#*:/}" ;;
-        *) printf '%s' "$1" ;;
-    esac
-}
-
-# remember_session_id_host_hint RAW -> prints "copilot" or "" (no side effects)
+# remember_session_id_resolve RAW -> sets REMEMBER_SESSION_ID_NORMALIZED (the
+# id to use) and REMEMBER_SESSION_ID_HINT ("copilot" or ""); both are
+# overwritten on every call. Always returns 0. No command substitution.
 #
-# "copilot" when RAW has the agent-host prefix, or when the environment says
-# Copilot and does not say Claude Code. The names come from
-# pipeline/host.py's COPILOT.signature_vars (COPILOT_CLI, COPILOT_PLUGIN_ROOT)
-# and Claude Code's signature (CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_SESSION_ID);
-# like pipeline.host.detect_host, Claude Code's signature wins. COPILOT_HOME is
-# deliberately not consulted: a configuration path a user may set anywhere is
-# not a signature (#463).
-remember_session_id_host_hint() {
-    case "$1" in agent-host-*:/*) printf 'copilot'; return 0 ;; esac
+# The hint is "copilot" when RAW has the agent-host prefix, or when the
+# environment carries Copilot's signature and no signature of a host that
+# pipeline/host.REGISTRY lists before COPILOT -- the same first-match order
+# pipeline.host.detect_host uses. Names, from pipeline/host.py:
+#   CLAUDE_CODE.signature_vars  CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_SESSION_ID
+#   CODEX.signature_vars        CODEX_SESSION_ID, CODEX_THREAD_ID
+#   ANTIGRAVITY.signature_vars  ANTIGRAVITY_CONVERSATION_ID
+#   COPILOT.signature_vars      COPILOT_CLI, COPILOT_PLUGIN_ROOT
+# so a Codex or Antigravity session whose environment also carries COPILOT_CLI
+# keeps its own plain-text recap. COPILOT_HOME is deliberately not consulted:
+# a configuration path a user may set anywhere is not a signature (#463).
+remember_session_id_resolve() {
+    REMEMBER_SESSION_ID_HINT=""
+    case "$1" in
+        agent-host-*:/*)
+            REMEMBER_SESSION_ID_NORMALIZED="${1#*:/}"
+            REMEMBER_SESSION_ID_HINT=copilot
+            return 0
+            ;;
+    esac
+    REMEMBER_SESSION_ID_NORMALIZED="$1"
     if [ -z "${CLAUDE_CODE_ENTRYPOINT:-}" ] && [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] \
+        && [ -z "${CODEX_SESSION_ID:-}" ] && [ -z "${CODEX_THREAD_ID:-}" ] \
+        && [ -z "${ANTIGRAVITY_CONVERSATION_ID:-}" ] \
         && { [ -n "${COPILOT_CLI:-}" ] || [ -n "${COPILOT_PLUGIN_ROOT:-}" ]; }; then
-        printf 'copilot'
+        REMEMBER_SESSION_ID_HINT=copilot
     fi
     return 0
 }
 
-# remember_copilot_transcript_for UUID -> prints the Copilot events file if it
-# exists, else nothing. Mirrors pipeline/host.copilot_transcript_for().
-remember_copilot_transcript_for() {
+# remember_normalize_session_id RAW -> prints the id to use
+remember_normalize_session_id() {
+    remember_session_id_resolve "$1"
+    printf '%s' "$REMEMBER_SESSION_ID_NORMALIZED"
+}
+
+# remember_session_id_host_hint RAW -> prints "copilot" or ""
+remember_session_id_host_hint() {
+    remember_session_id_resolve "$1"
+    printf '%s' "$REMEMBER_SESSION_ID_HINT"
+    return 0
+}
+
+# remember_copilot_transcript_into UUID -> sets REMEMBER_COPILOT_TRANSCRIPT to
+# the Copilot events file and returns 0 if it exists; else sets it to "" and
+# returns 1. No command substitution. Mirrors
+# pipeline/host.copilot_transcript_for().
+remember_copilot_transcript_into() {
+    REMEMBER_COPILOT_TRANSCRIPT=""
     case "$1" in
         ''|.|..|*/*|*\\*|*:*) return 1 ;;
     esac
@@ -67,5 +102,13 @@ remember_copilot_transcript_for() {
     _rc_base="${COPILOT_HOME:-${HOME:-}/.copilot}"
     _rc_path="${_rc_base%/}/session-state/$1/events.jsonl"
     [ -f "$_rc_path" ] || return 1
-    printf '%s' "$_rc_path"
+    REMEMBER_COPILOT_TRANSCRIPT="$_rc_path"
+    return 0
+}
+
+# remember_copilot_transcript_for UUID -> prints the Copilot events file if it
+# exists, else nothing (status 1).
+remember_copilot_transcript_for() {
+    remember_copilot_transcript_into "$1" || return 1
+    printf '%s' "$REMEMBER_COPILOT_TRANSCRIPT"
 }
