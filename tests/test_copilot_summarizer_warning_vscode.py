@@ -1,5 +1,13 @@
-"""A VS Code Agents / Copilot transcript under REMEMBER_SUMMARIZER=auto resolves
-"claude" (no Copilot-native summarizer) and says so (issue: vscode; #567 precedent)."""
+"""Pins the summarizer provider choice for a SUPPLIED Copilot transcript path:
+under REMEMBER_SUMMARIZER=auto, a VS Code Agents / Copilot transcript in
+REMEMBER_TRANSCRIPT_PATH resolves "claude" (there is no Copilot-native
+summarizer) and logs the fallback (issue: vscode; #567 precedent).
+
+The live host does not supply one: VS Code sends no `transcript_path` and no
+hook exports the resolved Copilot file, so on the live path the provider is
+still "claude" but this warning is not logged (observed in the live run's
+save log: `provider: claude`, no warning). These tests set the variable by
+hand to exercise the branch."""
 from __future__ import annotations
 
 import os
