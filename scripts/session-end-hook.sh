@@ -38,10 +38,24 @@
 #
 #   `reason` is documented (Claude Code hooks reference, checked 2026-08) as
 #   one of clear/resume/logout/prompt_input_exit/other, but is treated here as
-#   an opaque, unvalidated token — logged for diagnostics, never branched on.
-#   No reason this hook has actually observed in the wild disqualifies a
-#   flush: the whole point is that this is the last chance, not a routine
-#   tick, so every reason gets the same unconditional attempt.
+#   an opaque, unvalidated token — logged for diagnostics, and branched on in
+#   exactly one place (below). No reason this hook has actually observed in
+#   the wild disqualifies a flush: the whole point is that this is the last
+#   chance, not a routine tick, so every reason gets the same unconditional
+#   attempt.
+#
+#   The one exception is opt-in and changes WHEN, not WHETHER (issue:
+#   vscode). VS Code Agents (the Copilot harness) sends SessionEnd with
+#   reason=complete after every turn and nothing on close, so this hook's
+#   save runs once per turn there. When the host hint is `copilot`, the
+#   reason is `complete`, a validated session id is present and
+#   cooldowns.turn_end_debounce_seconds is a positive integer N, the
+#   backgrounded save first sleeps N seconds and is dropped if a later
+#   turn's SessionEnd for the same session has replaced its token in
+#   tmp/turn-end.<session-id> -- one save per burst of turns, N seconds
+#   after the last one. The key defaults to 0, and at 0 (or any value that
+#   is not a plain non-negative integer), on any other host and for any
+#   other reason, the save runs immediately exactly as before.
 #
 #   Whether SessionEnd fires at all on a crash, a killed terminal, or a
 #   process hitting the usage cap is NOT established by that same reference —
@@ -402,6 +416,64 @@ if [ ! -f "$SAVE_SCRIPT" ]; then
     exit 0
 fi
 
+# --- Opt-in turn-end debounce (issue: vscode) ---
+# The one exception the header's STDIN section describes. Off unless all of:
+# the Copilot host hint, reason=complete (what that host sends after every
+# turn), a validated session id, and cooldowns.turn_end_debounce_seconds a
+# positive integer. Anything else leaves _TURN_END_DEBOUNCE at 0 and the
+# subshell below takes today's path untouched: no token file, no sleep.
+#
+# No session id, no debounce: the token file is keyed by it, and without one
+# every session in this store would share a single token -- a turn in one
+# window could cancel another window's save. save-session.sh without an id
+# also picks its session by discovery, so a deferred call could save a
+# different session than the turn that scheduled it.
+#
+# The token is written HERE, by this (already detached) hook process, before
+# the fork below -- so it is on disk before this turn's own sleeper can read
+# it. The sleep happens only inside the backgrounded subshell; nothing here
+# waits, so the host-facing process (which returned at the detach near the
+# top of this file) is unaffected either way. A later turn rewrites the file
+# with `>`; a sleeper that reads it mid-write sees an empty or partial token,
+# which differs from its own, and stands down -- correct, since the writer is
+# a newer turn whose own sleeper will save. The winner removes the file just
+# before it saves; a newer token written in the instant between its read and
+# that removal is lost with the file, and that newer sleeper stands down --
+# acceptable, because the winner's save starts after that newer turn ended
+# and so reads its content too.
+#
+# During the window, tmp/save-session.pid (written below) names the sleeping
+# subshell, so post-tool-hook.sh treats a save as already in flight -- which
+# it is, N seconds out.
+#
+# Digits only, same guard as save-session.sh's own config reads: a typo, a
+# negative, a fraction or a boolean degrades to 0, which is today's path.
+# More than nine digits is treated the same way, so 10# below cannot wrap a
+# huge value into an arbitrary one.
+_TURN_END_DEBOUNCE=0
+_TURN_END_TOKEN=""
+_TURN_END_FILE=""
+if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ "$SESSION_END_REASON" = complete ] \
+    && [ -n "$STDIN_SESSION_ID" ] && declare -F config_into >/dev/null 2>&1; then
+    config_into _TURN_END_DEBOUNCE ".cooldowns.turn_end_debounce_seconds" 0
+    case "$_TURN_END_DEBOUNCE" in
+        ''|*[!0-9]*|??????????*) _TURN_END_DEBOUNCE=0 ;;
+    esac
+    _TURN_END_DEBOUNCE=$(( 10#$_TURN_END_DEBOUNCE ))
+    if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
+        _TURN_END_FILE="$REMEMBER_DIR/tmp/turn-end.$STDIN_SESSION_ID"
+        _TURN_END_TOKEN="$$-$RANDOM-$(_remember_date +%s)"
+        if printf '%s\n' "$_TURN_END_TOKEN" > "$_TURN_END_FILE" 2>/dev/null; then
+            log "hook" "session-end: turn-end save deferred ${_TURN_END_DEBOUNCE}s (cooldowns.turn_end_debounce_seconds)"
+        else
+            # A sleeper with no token on disk would always stand down and
+            # nothing would save. Save now instead, and say why.
+            log "hook" "session-end: could not write $_TURN_END_FILE -- turn-end save not deferred"
+            _TURN_END_DEBOUNCE=0
+        fi
+    fi
+fi
+
 # --- Flush, unconditionally, in the BACKGROUND ---
 # save-session.sh --force bypasses its own cooldown timer AND its
 # min-human-message gate (see its own USAGE block) — exactly the two gates
@@ -462,6 +534,16 @@ if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
 fi
 (
+    if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
+        sleep "$_TURN_END_DEBOUNCE"
+        _turn_end_seen=""
+        { read -r _turn_end_seen < "$_TURN_END_FILE"; } 2>/dev/null
+        if [ "$_turn_end_seen" != "$_TURN_END_TOKEN" ]; then
+            log "hook" "session-end: turn-end save superseded by a later turn"
+            exit 0
+        fi
+        rm -f "$_TURN_END_FILE" 2>/dev/null
+    fi
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
     else

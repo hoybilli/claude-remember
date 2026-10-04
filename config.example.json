@@ -2,6 +2,7 @@
   "data_dir": ".remember",
   "cooldowns": {
     "save_seconds": 120,
+    "turn_end_debounce_seconds": 0,
     "ndc_seconds": 3600,
     "git_backup_seconds": 900,
     "promo_seconds": 604800
