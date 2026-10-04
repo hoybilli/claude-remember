@@ -84,7 +84,7 @@ What this host does (**observed** in the three recorded sessions): it sends `Ses
 You can choose between two behaviours with `cooldowns.turn_end_debounce_seconds`:
 
 - **A. Immediate (default, `0`).** Every turn is saved as soon as its `SessionEnd` arrives: one summarizer call per turn that has new content (the observed cost was roughly half a cent to seven tenths of a cent per call), and a loss window of only the few seconds the save itself takes. **Observed** in the live run described under Verification.
-- **B. Debounced (`N` > 0).** Each turn's save waits `N` seconds, then runs only if no later turn of the same session has ended in the meantime. A burst of turns is saved once, `N` seconds after its last turn: one summarizer call per burst instead of one per turn, and one summary covering the whole burst rather than several fragments. The cost is a loss window of `N` seconds: if the machine sleeps or VS Code is killed inside it, that burst can go unsaved, and only a later turn in the same session would save it. The daily log records `session-end: turn-end save deferred Ns (cooldowns.turn_end_debounce_seconds)` when a save is scheduled and `session-end: turn-end save superseded by a later turn` when one stands down. **Tested, not yet observed live**: `tests/test_session_end_turn_debounce_vscode.py` drives the real hook under Git Bash on Windows; macOS/Linux is reasoned.
+- **B. Debounced (`N` > 0).** Each turn's save waits `N` seconds, then runs only if no later turn of the same session has ended in the meantime. A burst of turns is saved once, `N` seconds after its last turn: one summarizer call per burst instead of one per turn, and one summary covering the whole burst rather than several fragments (**reasoned**, not tested: the tests stub the save). The cost is a loss window of `N` seconds: if the machine sleeps or VS Code is killed inside it, that burst can go unsaved, and only a later turn in the same session would save it. The daily log records `session-end: turn-end save deferred Ns (cooldowns.turn_end_debounce_seconds)` when a save is scheduled and `session-end: turn-end save superseded by a later turn` when one stands down. **Tested, not yet observed live**: `tests/test_session_end_turn_debounce_vscode.py` drives the real hook under Git Bash on Windows; macOS/Linux is reasoned.
 
 To turn B on, put this in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project); 30 is an example:
 
@@ -96,7 +96,7 @@ To turn B on, put this in `~/.remember/config.json` (all projects) or `<project>
 }
 ```
 
-Other hosts are unaffected: the debounce applies only when the host is VS Code Agents / Copilot and the reason is `complete`. Claude Code, Codex and the rest, and any other `SessionEnd` reason, keep the immediate save whatever the key says. A value that is not a plain non-negative integer is read as `0`. See also [configuration.md](configuration.md).
+Other hosts are unaffected: the debounce applies only under the `copilot` host hint (VS Code Agents; the standalone Copilot CLI too, if it sends `complete` — unverified) and only when the reason is `complete`. Claude Code, Codex and the rest, and any other `SessionEnd` reason, keep the immediate save whatever the key says. A value that is not a plain non-negative integer is read as `0`. See also [configuration.md](configuration.md).
 
 ## Known gaps
 

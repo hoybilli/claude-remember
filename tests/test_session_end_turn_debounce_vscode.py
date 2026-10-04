@@ -13,8 +13,12 @@ one on disk.
 The real hook runs in a sandbox plugin root whose `save-session.sh` is a
 recording stub: one file per call, so the call count and each call's mtime
 are what the assertions read. Waits poll for those records (bounded), never a
-fixed sleep; the one timing assertion that needs a floor (case 2) compares
-the stub's mtime against the moment the hook returned.
+fixed sleep. Every timing claim is anchored on the token file the detached
+hook writes just before it forks the sleeper -- that write, not the moment
+the host-facing process returned, is when the window starts -- and the two
+debounced cases get windows wide enough that a slow hook preamble on a
+loaded runner cannot eat them. Where the runner is too slow anyway, the
+burst case says so instead of reporting a regression.
 
 Every "must not" here (no second save, no deferral line, no token file) is
 paired with a "must" in this module: cases 1 and 2 prove the deferral is
@@ -45,7 +49,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 UUID = "3f2b9c4e-7a1d-4e8b-9c0f-5d6e7f8a9b0c"
+# Key value for the immediate-path cases (they never sleep on it).
 WINDOW_S = 2
+# The burst case needs turn 2's token on disk before turn 1's sleeper wakes:
+# that gap is turn 2's whole detached preamble (~1 s on a desktop, measured
+# past 3 s on a slow Windows machine, #560), so the window is set well above it.
+BURST_WINDOW_S = 8
+# Case 2 asserts the host-facing hook returned inside the window, so the
+# window must sit well above a cold Git Bash start on a loaded runner.
+EXPIRY_WINDOW_S = 4
 POLL_DEADLINE_S = 40
 KEY = "turn_end_debounce_seconds"
 DEFERRED = "session-end: turn-end save deferred"
@@ -144,6 +156,32 @@ class Sandbox:
     def token_files(self) -> list[Path]:
         return sorted((self.remember / "tmp").glob("turn-end.*"))
 
+    def wait_for_token(self, other_than: str | None = None) -> tuple[str, float]:
+        """Poll tmp/turn-end.<UUID> until it holds a complete token (one
+        line) different from `other_than`; return (token, mtime). The read
+        is repeated around the stat so a rewrite between the two cannot pair
+        one turn's token with another turn's mtime."""
+        path = self.remember / "tmp" / f"turn-end.{UUID}"
+        found: list[tuple[str, float]] = []
+
+        def _probe() -> bool:
+            try:
+                before = path.read_bytes()
+                mtime = path.stat().st_mtime
+                after = path.read_bytes()
+            except OSError:
+                return False
+            if before != after or not before.endswith(b"\n"):
+                return False
+            token = before.decode("utf-8", errors="replace").strip()
+            if not token or token == other_than:
+                return False
+            found.append((token, mtime))
+            return True
+
+        self.wait_for(_probe, f"a token in {path.name} other than {other_than!r}")
+        return found[-1]
+
     def wait_for(self, cond, what: str) -> None:
         deadline = time.monotonic() + POLL_DEADLINE_S
         while time.monotonic() < deadline:
@@ -172,10 +210,24 @@ class Sandbox:
 # --- The debounced path (cases 1 and 2) -------------------------------------
 
 def test_debounce_two_turns_in_a_burst_save_exactly_once(tmp_path):
-    sb = Sandbox(tmp_path, key_value=WINDOW_S)
+    sb = Sandbox(tmp_path, key_value=BURST_WINDOW_S)
+    # Turn 1's token is taken off disk before turn 2 is launched, so T1 and
+    # T2 below are known to be turn 1's and turn 2's -- launching both first
+    # would let turn 2's faster preamble write first and swap them.
     sb.run_hook(copilot=True)
-    time.sleep(0.3)
+    token1, mtime1 = sb.wait_for_token()
     sb.run_hook(copilot=True)
+    token2, mtime2 = sb.wait_for_token(other_than=token1)
+
+    # The precondition for "one save per burst": turn 2's token landed inside
+    # turn 1's window. If it did not, two saves are the CORRECT outcome, and
+    # what failed is the runner's speed, not the hook.
+    if mtime2 - mtime1 >= BURST_WINDOW_S:
+        pytest.fail(
+            f"runner too slow to exercise the burst: turn 2's token landed "
+            f"{mtime2 - mtime1:.2f}s after turn 1's, outside the "
+            f"{BURST_WINDOW_S}s window -- an environment problem, not a "
+            f"regression in the debounce")
 
     # Both detached children reached the fork, and each sleeper has resolved
     # one way or the other (saved, or logged superseded). Terminates on the
@@ -189,24 +241,30 @@ def test_debounce_two_turns_in_a_burst_save_exactly_once(tmp_path):
         f"once per turn -- saves: {[p.read_text() for p in sb.saves()]}\n{log}")
     assert log.count(SUPERSEDED) == 1, log
     assert log.count(DEFERRED) == 2, log
-    assert f"{DEFERRED} {WINDOW_S}s (cooldowns.{KEY})" in log, log
+    assert f"{DEFERRED} {BURST_WINDOW_S}s (cooldowns.{KEY})" in log, log
     assert sb.saves()[0].read_text().split() == [UUID, "--force"]
+    # Turn 2's sleeper is the one that saved: not before its own window.
+    assert sb.saves()[0].stat().st_mtime - mtime2 >= BURST_WINDOW_S
     assert sb.token_files() == [], sb.token_files()
 
 
 def test_debounce_window_expires_then_saves_and_the_hook_did_not_wait(tmp_path):
-    sb = Sandbox(tmp_path, key_value=WINDOW_S)
-    elapsed, returned_at = sb.run_hook(copilot=True)
+    sb = Sandbox(tmp_path, key_value=EXPIRY_WINDOW_S)
+    elapsed, _returned_at = sb.run_hook(copilot=True)
 
     # The sleep is in the detached background, not in the hook the host waits
     # on: were it in the foreground the hook could not return inside it.
-    assert elapsed < WINDOW_S, f"hook took {elapsed:.2f}s against a {WINDOW_S}s window"
+    assert elapsed < EXPIRY_WINDOW_S, (
+        f"hook took {elapsed:.2f}s against a {EXPIRY_WINDOW_S}s window")
 
+    # The window starts at the token write (the detached child writes it just
+    # before forking the sleeper), not when the host-facing process returned.
+    _token, token_mtime = sb.wait_for_token()
     sb.wait_for(lambda: len(sb.saves()) >= 1, "the deferred save to run")
     saved_at = sb.saves()[0].stat().st_mtime
-    assert saved_at - returned_at >= WINDOW_S, (
-        f"save ran {saved_at - returned_at:.2f}s after the hook returned; the "
-        f"debounce window is {WINDOW_S}s")
+    assert saved_at - token_mtime >= EXPIRY_WINDOW_S, (
+        f"save ran {saved_at - token_mtime:.2f}s after the token was written; "
+        f"the debounce window is {EXPIRY_WINDOW_S}s")
     log = sb.log_text()
     assert log.count(DEFERRED) == 1, log
     assert SUPERSEDED not in log, log
