@@ -1,8 +1,8 @@
 # Windows launcher for claude-remember hooks under VS Code Agents / Copilot CLI.
 # Copilot runs a hook's `powershell` command through Windows PowerShell, where a
 # bare `bash` may resolve to WSL (System32 precedes Git on PATH). This locates
-# Git Bash explicitly, forwards stdin (the hook payload JSON) and stdout
-# untouched as UTF-8, and returns bash's exit code.
+# Git Bash explicitly, hands it this process's own stdin (the hook payload
+# JSON) and stdout, and returns bash's exit code.
 #
 # Every failure of the launcher itself exits 0, like every hook path: a hook
 # that cannot run does nothing rather than failing the session. Only bash's own
@@ -11,23 +11,33 @@ param(
     [Parameter(Mandatory = $true)][string]$Script,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
+
+# One line on stderr. [Console]::Error is a method call on a non-core type,
+# which Constrained Language Mode refuses; Write-Error is allowed there.
+# (Write-Warning is not used: Windows PowerShell 5.1 writes the warning stream
+# to stdout, which would land in front of a SessionStart hook's JSON.)
+function Write-LauncherMessage([string]$Message) {
+    try { [Console]::Error.WriteLine($Message) }
+    catch { Write-Error -ErrorAction Continue -Message $Message }
+}
+
 try {
     $ErrorActionPreference = 'Stop'
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [Console]::InputEncoding = $utf8
-    [Console]::OutputEncoding = $utf8
-    $global:OutputEncoding = $utf8
 
+    # Everything from here to the language-mode check uses cmdlets and core
+    # types only, so it runs under Constrained Language Mode too.
     $candidates = @()
     if ($env:REMEMBER_BASH) { $candidates += $env:REMEMBER_BASH }
-    $bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)})
+    # ProgramW6432 first: a 32-bit PowerShell on 64-bit Windows resolves
+    # ProgramFiles to "Program Files (x86)" and would miss a 64-bit Git.
+    $bases = @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)})
     if ($env:LOCALAPPDATA) { $bases += (Join-Path $env:LOCALAPPDATA 'Programs') }
     foreach ($base in $bases) {
         if ($base) { $candidates += (Join-Path $base 'Git\bin\bash.exe') }
     }
     $bash = $null
     foreach ($c in $candidates) {
-        if (Test-Path -LiteralPath $c) { $bash = $c; break }
+        if (Test-Path -LiteralPath $c -PathType Leaf) { $bash = $c; break }
     }
     if (-not $bash) {
         # Skip WSL's launchers: System32\bash.exe and the Store alias under
@@ -38,7 +48,7 @@ try {
         if ($found) { $bash = $found.Source }
     }
     if (-not $bash) {
-        [Console]::Error.WriteLine('claude-remember: Git Bash not found; install Git for Windows or set REMEMBER_BASH to bash.exe')
+        Write-LauncherMessage 'claude-remember: Git Bash not found; install Git for Windows or set REMEMBER_BASH to bash.exe'
         exit 0
     }
 
@@ -46,6 +56,27 @@ try {
     if (-not $root) { $root = $env:COPILOT_PLUGIN_ROOT }
     if (-not $root) { $root = Split-Path -Parent $PSScriptRoot }
     $target = (Join-Path (Join-Path $root 'scripts') $Script).Replace('\', '/')
+
+    # stdin is not read here: bash inherits this process's stdin handle and
+    # reads the payload itself, so the bytes arrive exactly as the host wrote
+    # them (no re-encoding, no appended CRLF), EOF is the host's own, and the
+    # hooks' own bounded `read -t 1` applies when a host leaves the pipe open.
+    # Likewise stdout: bash writes to the inherited handle directly.
+
+    if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+        # Constrained Language Mode (AppLocker / WDAC script enforcement):
+        # the console-encoding setters and Add-Type below are refused, so the
+        # background work cannot be detached and the host waits for it. The
+        # hook itself still runs.
+        Write-LauncherMessage 'claude-remember: launcher: Constrained Language Mode; could not detach background work, the host will wait for it'
+        & $bash $target @Rest
+        exit $LASTEXITCODE
+    }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [Console]::InputEncoding = $utf8
+    [Console]::OutputEncoding = $utf8
+    $global:OutputEncoding = $utf8
 
     # The hooks return at once and leave their work to a detached background
     # child; the caller waits for this process's stdout to reach EOF. Windows
@@ -78,13 +109,12 @@ public static void KeepOnlyStdioInheritable() {
         }
         [ClaudeRemember.Handles]::KeepOnlyStdioInheritable()
     } catch {
-        [Console]::Error.WriteLine("claude-remember: launcher: could not detach background work ($_); the host will wait for it")
+        Write-LauncherMessage "claude-remember: launcher: could not detach background work ($_); the host will wait for it"
     }
 
-    $payload = [Console]::In.ReadToEnd()
-    $payload | & $bash $target @Rest
+    & $bash $target @Rest
     exit $LASTEXITCODE
 } catch {
-    [Console]::Error.WriteLine("claude-remember: launcher error: $_")
+    Write-LauncherMessage "claude-remember: launcher error: $_"
     exit 0
 }

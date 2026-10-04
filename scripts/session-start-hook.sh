@@ -2592,9 +2592,11 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # Promos are skipped on this host on purpose: `systemMessage` was not
     # probed, and since no promo is shown no marker is written, so nothing is
     # burned. Without jq the recap falls through to plain text, which this
-    # host does not inject -- logged, so that silence is diagnosable.
+    # host does not inject -- logged, so that silence is diagnosable. So is a
+    # failed envelope. (Wording: no bare ` jq ` word in a log string -- the
+    # #601 lint in tests/test_path_resolution.py reads it as a hardcoded call.)
     if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && ! command -v jq >/dev/null 2>&1; then
-        log "hook" "session-start: copilot host without jq -- recap printed as plain text, which this host does not inject"
+        log "hook" "session-start: copilot host without jq, recap printed as plain text, which this host does not inject"
     fi
     if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && command -v jq >/dev/null 2>&1; then
         _REMEMBER_HOST_JSON=$($JQ -Rs '{additionalContext:.}' \
@@ -2602,6 +2604,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
         if [ -n "$_REMEMBER_HOST_JSON" ]; then
             printf '%s\n' "$_REMEMBER_HOST_JSON"
         else
+            log "hook" "session-start: copilot envelope could not be built, recap printed as plain text, which this host does not inject"
             cat "$_REMEMBER_CTX_FILE"
         fi
     elif [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
@@ -2642,6 +2645,12 @@ else
     # removed; on this branch the buffer redirect never engaged, so it was
     # never created, but $_hook_stdin_file still needs its own remove.
     rm -f "$_hook_stdin_file" 2>/dev/null
+    # The recap already went out live, as plain text, which the Copilot host
+    # does not inject (a trace is running, or tmp/ is not writable): say so,
+    # or a traced VS Code session loses its recap without a trace.
+    if [ "${REMEMBER_HOST_HINT:-}" = copilot ]; then
+        log "hook" "session-start: copilot host, recap not buffered (trace on or tmp/ not writable), printed as plain text, which this host does not inject"
+    fi
 fi
 # _REMEMBER_CTX_OK empty: the buffer redirect never engaged, so every line
 # above already went straight to the real terminal as it always did -- there

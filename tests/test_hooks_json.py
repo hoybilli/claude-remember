@@ -447,7 +447,12 @@ def _script_named_by(command: str) -> str:
 # `-ExecutionPolicy Bypass`, so a Restricted/RemoteSigned user policy on the
 # shell VS Code starts cannot block the launcher, and `exit $LASTEXITCODE`
 # so bash's exact status survives (`-Command "& x.ps1"` collapses it to 1).
-_PS_VALUE = ('powershell -NoProfile -ExecutionPolicy Bypass -File '
+# `-NoLogo -NonInteractive` on the child: no logo on any path that honours it,
+# and a launcher run without its mandatory script name errors instead of
+# prompting on stdin. NOT a fix for an unset or stale root: there `-File`
+# fails before any script runs, and Windows PowerShell 5.1 prints its banner
+# to stdout even with -NoLogo (observed) -- see docs/install-vscode.md.
+_PS_VALUE = ('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '
              '"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}; exit $LASTEXITCODE')
 
 
@@ -613,7 +618,9 @@ def test_manifest_values_run_under_restricted_execution_policy(tmp_path):
         assert result.returncode == 0, f"{loc}: {result.stderr!r}"
         name = _script_named_by(hook["command"])
         seen = (out_dir / f"{name}.stdin").read_bytes()
-        assert seen.rstrip(b"\r\n") == _PAYLOAD.encode("utf-8"), f"{loc}: {seen!r}"
+        # Exact: bash inherits the launcher's stdin, so nothing is re-encoded
+        # and no CRLF is appended (the payload has no trailing newline).
+        assert seen == _PAYLOAD.encode("utf-8"), f"{loc}: {seen!r}"
 
 
 @_needs_win_launcher
@@ -810,7 +817,7 @@ def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):
     """Run the launcher where only its PATH lookup can find bash. PATH holds a
     fake `bash.exe` (not a program) ahead of Git's. ProgramFiles cannot be
     overridden through the child's environment block (Windows recomputes it at
-    process start -- observed), so the three base directories are reassigned
+    process start -- observed), so the four base directories are reassigned
     inside the PowerShell process and the launcher is called in that process."""
     empty = tmp_path / "empty"
     empty.mkdir(exist_ok=True)
@@ -825,6 +832,7 @@ def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):
     }, path_first_system32=False)
     launcher = root / "scripts" / "run-hook.ps1"
     command = (
+        f"$env:ProgramW6432 = '{empty}'; "
         f"$env:ProgramFiles = '{empty}'; ${{env:ProgramFiles(x86)}} = '{empty}'; "
         f"$env:LOCALAPPDATA = '{empty}'; "
         f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
@@ -857,3 +865,238 @@ def test_path_lookup_takes_the_first_bash_otherwise(tmp_path):
     result = _run_path_lookup_only(tmp_path, root, "SomeTools", marker)
     assert not marker.exists()
     assert result.returncode == 0, result.stderr
+
+
+@_needs_win_launcher
+def test_program_w6432_is_a_git_bash_base(tmp_path):
+    """A 32-bit PowerShell sees ProgramFiles as "Program Files (x86)"; the
+    64-bit Git under ProgramW6432 must still be found. Here the other three
+    bases are emptied and PATH holds no bash at all, so only ProgramW6432 can
+    reach it. Observed on Windows only (64-bit PowerShell, simulated)."""
+    git_base = Path(GIT_BASH).parent.parent.parent  # <base>\Git\bin\bash.exe
+    if not (git_base / "Git" / "bin" / "bash.exe").is_file():
+        pytest.skip(f"Git Bash is not at <base>\\Git\\bin\\bash.exe here ({GIT_BASH})")
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
+                               "PATH": sys32}, path_first_system32=False)
+    launcher = root / "scripts" / "run-hook.ps1"
+    command = (
+        f"$env:ProgramW6432 = '{git_base}'; "
+        f"$env:ProgramFiles = '{empty}'; ${{env:ProgramFiles(x86)}} = '{empty}'; "
+        f"$env:LOCALAPPDATA = '{empty}'; "
+        f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
+    )
+    result = subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", command],
+        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file(), result.stderr
+    assert b"Git Bash not found" not in result.stderr
+
+
+@_needs_win_launcher
+def test_remember_bash_pointing_at_a_directory_falls_through(tmp_path):
+    """REMEMBER_BASH naming a directory is not a program: the launcher must
+    skip it (Test-Path -PathType Leaf) and find Git Bash as usual, rather
+    than try to run the directory."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
+    a_dir = tmp_path / "a-directory"
+    a_dir.mkdir()
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
+                               "REMEMBER_BASH": str(a_dir)})
+    result = _run_launcher_file(root, "probe.sh", env)
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file(), result.stderr
+    assert b"launcher error" not in result.stderr
+
+
+# --- stdin: bash inherits the launcher's handle -----------------------------
+# The launcher does not read stdin; bash reads the host's pipe itself. So the
+# bytes arrive exactly (no re-encoding, no appended CRLF), EOF is the host's
+# own, and the hooks' own `read -t 1` bound applies to a pipe left open.
+
+_STDIN_SEEN_STUB = 'cat > "$REMEMBER_TEST_OUT"\nexit 5\n'
+
+
+def _launcher_with_input(root, script, payload: bytes, env, manifest: bool):
+    if manifest:
+        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-Command", _PS_VALUE.format(name=script)]
+    else:
+        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(root / "scripts" / "run-hook.ps1"), script]
+    return subprocess.run(argv, input=payload, capture_output=True, env=env, timeout=120)
+
+
+@_needs_win_launcher
+@pytest.mark.parametrize("manifest", [False, True], ids=["-File", "manifest"])
+def test_launcher_hands_bash_the_exact_stdin_bytes(tmp_path, manifest):
+    """No trailing newline, non-ASCII, a CR in the middle: what bash reads is
+    byte-identical to what the host wrote. `cat` returning at all is the EOF
+    check (it would hang otherwise; the run has a timeout)."""
+    out = tmp_path / "seen.bin"
+    root = _fake_plugin(tmp_path, {"seen.sh": _STDIN_SEEN_STUB})
+    payload = '{"a":"ünï – 日本","b":"x\ry"}'.encode("utf-8")
+    env = _launcher_env(root, {"REMEMBER_TEST_OUT": str(out).replace("\\", "/")})
+    result = _launcher_with_input(root, "seen.sh", payload, env, manifest)
+    assert result.returncode == 5, result.stderr
+    assert out.read_bytes() == payload
+
+
+@_needs_win_launcher
+@pytest.mark.parametrize("manifest", [False, True], ids=["-File", "manifest"])
+def test_launcher_hands_bash_a_large_stdin_complete(tmp_path, manifest):
+    """>= 1 MB of stdin (past every pipe buffer) arrives complete."""
+    out = tmp_path / "seen.bin"
+    root = _fake_plugin(tmp_path, {"seen.sh": _STDIN_SEEN_STUB})
+    payload = (b'{"transcript":"' + "ünï 日本 ".encode("utf-8") * 90_000 + b'"}')
+    assert len(payload) >= 1024 * 1024
+    env = _launcher_env(root, {"REMEMBER_TEST_OUT": str(out).replace("\\", "/")})
+    result = _launcher_with_input(root, "seen.sh", payload, env, manifest)
+    assert result.returncode == 5, result.stderr
+    seen = out.read_bytes()
+    assert len(seen) == len(payload) and seen == payload
+
+
+_READ_T1_STUB = 'IFS= read -r -t 1 line\nprintf "got:%s\\n" "$line"\nexit 0\n'
+_HELD_OPEN_BOUND_S = 10
+
+
+def _held_open(root, script, payload: bytes, env, manifest: bool, close: bool):
+    """Write the payload and either close stdin or keep it open; return
+    (seconds until the launcher exited or the bound passed, stdout, rc)."""
+    if manifest:
+        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-Command", _PS_VALUE.format(name=script)]
+    else:
+        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(root / "scripts" / "run-hook.ps1"), script]
+    started = time.monotonic()
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        if close:
+            proc.stdin.close()
+        deadline = started + _HELD_OPEN_BOUND_S + 20
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        took = time.monotonic() - started
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+            return took, b"", None
+        return took, proc.stdout.read(), proc.returncode
+    finally:
+        if not proc.stdin.closed:
+            proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+@_needs_win_launcher
+@pytest.mark.parametrize("manifest", [False, True], ids=["-File", "manifest"])
+def test_launcher_returns_when_bash_exits_with_stdin_held_open(tmp_path, manifest):
+    """The host writes the payload and never closes stdin: a hook that reads
+    with `read -t 1` and exits must return the launcher, not leave it blocked
+    on the open pipe."""
+    root = _fake_plugin(tmp_path, {"readt.sh": _READ_T1_STUB})
+    took, out, rc = _held_open(root, "readt.sh", b'{"a":1}', _launcher_env(root),
+                               manifest, close=False)
+    assert rc == 0, f"launcher still running after {took:.1f}s with stdin held open"
+    assert took < _HELD_OPEN_BOUND_S, f"{took:.1f}s"
+    assert out.decode("utf-8").rstrip("\r\n") == 'got:{"a":1}'
+
+
+@_needs_win_launcher
+def test_launcher_returns_with_stdin_closed_too(tmp_path):
+    """Positive control for the held-open case: the same stub with stdin
+    closed returns and reads the same payload."""
+    root = _fake_plugin(tmp_path, {"readt.sh": _READ_T1_STUB})
+    took, out, rc = _held_open(root, "readt.sh", b'{"a":1}\n', _launcher_env(root),
+                               manifest=False, close=True)
+    assert rc == 0 and took < _HELD_OPEN_BOUND_S
+    assert out.decode("utf-8").rstrip("\r\n") == 'got:{"a":1}'
+
+
+# --- Constrained Language Mode ----------------------------------------------
+# CLM is what AppLocker / WDAC script enforcement imposes. Setting
+# `__PSLockdownPolicy=4` in a child's environment did NOT engage it on this
+# machine's Windows PowerShell 5.1 (LanguageMode stayed FullLanguage --
+# observed), so the session's language mode is set in-process and the
+# launcher is called in that session, where scripts inherit it (observed).
+
+_CLM_STDOUT = "clm stdout ünï – 日本"
+
+
+def _run_launcher_in_language_mode(root, mode, marker):
+    launcher = root / "scripts" / "run-hook.ps1"
+    pre = f"$ExecutionContext.SessionState.LanguageMode = '{mode}'; " if mode else ""
+    command = pre + f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")})
+    return subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", command],
+        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120)
+
+
+def _clm_stub():
+    return ('cat > "$REMEMBER_TEST_MARKER"\nprintf "%s\\n" "' + _CLM_STDOUT + '"\nexit 4\n')
+
+
+@_needs_win_launcher
+def test_launcher_runs_the_hook_under_constrained_language_mode(tmp_path):
+    """Under CLM the hook still runs with the payload on stdin, its stdout
+    and exit code come through, and one line on stderr says the background
+    work could not be detached (nothing on stdout but the hook's own)."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _clm_stub()})
+    result = _run_launcher_in_language_mode(root, "ConstrainedLanguage", marker)
+    assert marker.is_file(), result.stderr
+    assert marker.read_bytes() == _PAYLOAD.encode("utf-8")
+    assert result.returncode == 4, result.stderr
+    assert result.stdout.decode("utf-8").rstrip("\r\n") == _CLM_STDOUT, result.stdout
+    assert b"Constrained Language Mode" in result.stderr, result.stderr
+    assert b"launcher error" not in result.stderr, result.stderr
+
+
+@_needs_win_launcher
+def test_full_language_mode_takes_the_normal_path(tmp_path):
+    """Positive control: the same call without CLM runs the hook too, and
+    says nothing about Constrained Language Mode -- the line above comes from
+    the language-mode check, not from every run."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _clm_stub()})
+    result = _run_launcher_in_language_mode(root, None, marker)
+    assert marker.is_file(), result.stderr
+    assert result.returncode == 4, result.stderr
+    assert result.stdout.decode("utf-8").rstrip("\r\n") == _CLM_STDOUT, result.stdout
+    assert b"Constrained Language Mode" not in result.stderr, result.stderr
+
+
+@_needs_win_launcher
+def test_launcher_error_under_constrained_language_mode_still_exits_zero(tmp_path):
+    """The outer catch is CLM-safe: an error inside the launcher under CLM
+    (here: REMEMBER_BASH is a file that is not a program) is reported and the
+    launcher exits 0, instead of the catch itself throwing."""
+    bogus = tmp_path / "bogus" / "bash.exe"
+    bogus.parent.mkdir()
+    bogus.write_text("not a program", encoding="utf-8")
+    root = _fake_plugin(tmp_path, {"probe.sh": "cat >/dev/null\n"})
+    launcher = root / "scripts" / "run-hook.ps1"
+    command = ("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; "
+               f"& '{launcher}' probe.sh; exit $LASTEXITCODE")
+    result = subprocess.run(
+        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", command],
+        input=_PAYLOAD.encode("utf-8"), capture_output=True,
+        env=_launcher_env(root, {"REMEMBER_BASH": str(bogus)}), timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert b"claude-remember: launcher error" in result.stderr, result.stderr

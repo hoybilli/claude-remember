@@ -719,8 +719,10 @@ if [ -n "${_LS_SESSION:-}" ]; then
     if command -v remember_copilot_transcript_for >/dev/null 2>&1; then
         # Prints nothing when the file is absent or the id is refused (its own
         # allowlist rejects '/', '\', ':', '.' and '..'); the scrub is the same
-        # #727 guard the .session read above applies, since COPILOT_HOME is
-        # spliced into a column-0 line commands/doctor.md relays verbatim.
+        # #727 guard the .session read above applies to the value printed on
+        # the line below, which commands/doctor.md relays verbatim. (Other env
+        # paths, the Paths section's session-state line included, print unscrubbed,
+        # as elsewhere in this file.)
         _COPILOT_LAST_SAVE_TRANSCRIPT=$(remember_copilot_transcript_for "$_LS_SESSION" 2>/dev/null | tr -d '[:cntrl:]')
     fi
 fi

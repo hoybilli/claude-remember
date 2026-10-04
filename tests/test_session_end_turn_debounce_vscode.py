@@ -18,7 +18,7 @@ hook writes just before it forks the sleeper -- that write, not the moment
 the host-facing process returned, is when the window starts -- and the two
 debounced cases get windows wide enough that a slow hook preamble on a
 loaded runner cannot eat them. Where the runner is too slow anyway, the
-burst case says so instead of reporting a regression.
+burst case skips with that reason instead of reporting a regression.
 
 Every "must not" here (no second save, no deferral line, no token file) is
 paired with a "must" in this module: cases 1 and 2 prove the deferral is
@@ -229,7 +229,7 @@ def test_debounce_two_turns_in_a_burst_save_exactly_once(tmp_path):
     # turn 1's window. If it did not, two saves are the CORRECT outcome, and
     # what failed is the runner's speed, not the hook.
     if mtime2 - mtime1 >= BURST_WINDOW_S:
-        pytest.fail(
+        pytest.skip(
             f"runner too slow to exercise the burst: turn 2's token landed "
             f"{mtime2 - mtime1:.2f}s after turn 1's, outside the "
             f"{BURST_WINDOW_S}s window -- an environment problem, not a "
@@ -323,3 +323,83 @@ def test_no_session_id_is_not_debounced(tmp_path):
     sb.run_hook(copilot=True, session_id=None)
     sb.assert_immediate_single_save()
     assert sb.saves()[0].read_text().split() == ["--force"]
+
+
+# --- The cap -----------------------------------------------------------------
+
+CLAMPED = "session-end: cooldowns.turn_end_debounce_seconds=999999 clamped to 3600"
+
+# Stops the sleeping subshell (and its `sleep` child) the clamp case leaves
+# behind, so no hour-long process outlives the test. `ps -ef` prints PID and
+# PPID as its second and third columns on Linux, macOS and Git Bash alike
+# (Git Bash's `ps` has no -o).
+_STOP_SLEEPER = r'''p=$1
+kids=$(ps -ef 2>/dev/null | awk -v p="$p" '$3==p {print $2}')
+kill $kids "$p" 2>/dev/null
+exit 0
+'''
+
+
+def _stop_sleeper(sb: Sandbox) -> None:
+    pid_file = sb.remember / "tmp" / "save-session.pid"
+    pid = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
+    if pid.isdigit():
+        subprocess.run([BASH, "-c", _STOP_SLEEPER, "stop", pid],
+                       capture_output=True, timeout=30, check=False)
+
+
+def test_debounce_above_an_hour_is_clamped_to_an_hour(tmp_path):
+    sb = Sandbox(tmp_path, key_value=999999)
+    try:
+        sb.run_hook(copilot=True)
+        sb.wait_for(lambda: DEFERRED in sb.log_text(), "the deferral line")
+        log = sb.log_text()
+        assert log.count(CLAMPED) == 1, log
+        assert f"{DEFERRED} 3600s (cooldowns.{KEY})" in log, log
+        assert sb.saves() == []
+    finally:
+        _stop_sleeper(sb)
+
+
+def test_debounce_at_or_below_an_hour_is_not_clamped(tmp_path):
+    """Paired control: a value inside the cap is used as given, with no
+    clamp line (the deferral line proves the log was read)."""
+    sb = Sandbox(tmp_path, key_value=EXPIRY_WINDOW_S)
+    sb.run_hook(copilot=True)
+    sb.wait_for(lambda: len(sb.saves()) >= 1, "the deferred save to run")
+    log = sb.log_text()
+    assert f"{DEFERRED} {EXPIRY_WINDOW_S}s (cooldowns.{KEY})" in log, log
+    assert "clamped to 3600" not in log, log
+
+
+# --- The validator still runs after the prefix strip (end to end) ----------
+
+def _tree(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
+
+
+def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
+    """`agent-host-x:/../../x` strips to `../../x`, which the hook's own
+    validator must empty: the hook exits 0, logs `session=unresolved`, saves
+    without an id (not debounced: nothing safe to key a token on), and
+    writes nothing outside the sandbox store."""
+    sb = Sandbox(tmp_path, key_value=WINDOW_S)
+    before = _tree(tmp_path)
+    sb.run_hook(copilot=True, session_id="agent-host-x:/../../x")
+    sb.assert_immediate_single_save()
+    assert "session=unresolved" in sb.log_text()
+    assert sb.saves()[0].read_text().split() == ["--force"]
+    new = _tree(tmp_path) - before
+    allowed = ("project/.remember/", "saves/", "marker.log")
+    outside = sorted(p for p in new if not p.startswith(allowed))
+    assert outside == [], outside
+
+
+def test_prefixed_uuid_reaches_the_save_as_the_session_id(tmp_path):
+    """Positive control for the rejection above: the same prefix with a valid
+    id keeps the id (immediate path, key absent)."""
+    sb = Sandbox(tmp_path)
+    sb.run_hook(copilot=False, session_id=f"agent-host-copilotcli:/{UUID}")
+    sb.assert_immediate_single_save()
+    assert f"session={UUID}" in sb.log_text()
+    assert sb.saves()[0].read_text().split() == [UUID, "--force"]

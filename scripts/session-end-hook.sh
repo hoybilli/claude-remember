@@ -444,7 +444,8 @@ fi
 #
 # During the window, tmp/save-session.pid (written below) names the sleeping
 # subshell, so post-tool-hook.sh treats a save as already in flight -- which
-# it is, N seconds out.
+# it is, N seconds out -- and skips its delta saves until the sleeper is done.
+# N is capped at 3600 for that reason.
 #
 # Digits only, same guard as save-session.sh's own config reads: a typo, a
 # negative, a fraction or a boolean degrades to 0, which is today's path.
@@ -460,6 +461,13 @@ if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ "$SESSION_END_REASON" = complete
         ''|*[!0-9]*|??????????*) _TURN_END_DEBOUNCE=0 ;;
     esac
     _TURN_END_DEBOUNCE=$(( 10#$_TURN_END_DEBOUNCE ))
+    # Capped at an hour: the sleeper's pid holds tmp/save-session.pid for the
+    # whole window, which also suspends post-tool delta saves, so a huge
+    # value would mean a session that is never saved.
+    if [ "$_TURN_END_DEBOUNCE" -gt 3600 ]; then
+        log "hook" "session-end: cooldowns.turn_end_debounce_seconds=$_TURN_END_DEBOUNCE clamped to 3600"
+        _TURN_END_DEBOUNCE=3600
+    fi
     if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
         _TURN_END_FILE="$REMEMBER_DIR/tmp/turn-end.$STDIN_SESSION_ID"
         _TURN_END_TOKEN="$$-$RANDOM-$(_remember_date +%s)"
