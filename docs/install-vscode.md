@@ -46,7 +46,7 @@ The debounce applies only under the `copilot` host hint (VS Code Agents; the CLI
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Nothing injected at SessionStart | No `jq`; or the host was started from inside a Claude Code shell, which passes on its `CLAUDE_CODE_*` variables so the recap goes out as plain text (observed for the CLI, reasoned for VS Code) | Install `jq`; start VS Code or the Copilot app from a shell without Claude Code's variables |
+| Nothing injected at SessionStart | No `jq`; or the host was started from inside a Claude Code shell, so the recap goes out as plain text (observed for the CLI, reasoned for VS Code) | Install `jq`; start VS Code or `copilot` from a shell without Claude Code's `CLAUDE_CODE_*` variables |
 | A hook does nothing; stderr says `Git Bash not found` | No Git Bash found | Install Git for Windows, or set `REMEMBER_BASH` to `bash.exe` |
 | `scripts/doctor.sh` prints `FAIL Session dir MISSING` | Expected on a Copilot-only project | Read the `OK   last save came from a VS Code Agents / Copilot session` line and the verdict (`capture is working`, or the summarizer verdict). Needs `jq` |
 | In VS Code the harness shows SessionStart `success=false` | Another plugin's SessionStart hook failed | This plugin's context is still injected. Fix the other plugin |
@@ -69,7 +69,7 @@ Not done; see [vscode-verification.md](vscode-verification.md#coverage-gaps-and-
 
 - Send UserPromptSubmit output in the form the CLI accepts.
 - Make doctor tell a Copilot-only project from a mixed one.
-- Recognise Gemini CLI as its own host; a shell exporting `COPILOT_CLI` would treat it as Copilot.
+- Recognise Gemini CLI as its own host; a Gemini session started from a shell that exports `COPILOT_CLI` would be treated as Copilot (reasoned).
 - Record the VS Code version for the 2026-10-03 runs.
 
 Tests and fixtures for this port carry the placeholder token `vscode` in their names (`tests/test_*_vscode.py`, `tests/fixtures/vscode-*`).
