@@ -1,159 +1,32 @@
-# Installing under VS Code Agents, the Copilot CLI and the Copilot desktop app (GitHub Copilot harness)
+# Installing under VS Code Agents, the Copilot CLI and the Copilot desktop app
 
-Three hosts run the same Copilot harness and load this plugin from its Claude-format manifest: VS Code Agents, the standalone Copilot CLI, and the GitHub Copilot desktop app. All three were observed on Windows 11 with Git for Windows (Git Bash) and Windows PowerShell 5.1:
+The evidence behind this page, and the launcher's internals, are in [vscode-verification.md](vscode-verification.md).
 
-- **VS Code Agents**: probed on 2026-09-30 against VS Code 1.139.1, by dumping the environment and stdin from inside firing plugin hooks -- not only reasoned from documentation -- and re-run live on 2026-10-03 with the `-File` launcher entries. The VS Code version was not re-recorded for the 2026-10-03 runs: `code --version` reported 1.140.0 on 2026-09-30 after the window reloads, and the running window's version was not confirmed.
-- **Copilot CLI** 1.0.92-3, on 2026-10-03.
-- **Copilot desktop app**, on 2026-10-03 (its runtime reported `copilotVersion 0.0.0`; the app's own version was not determined).
+## What works
 
-See [Verification](#verification). macOS and Linux hosts are **reasoned, not observed** (the test suite, not a host, was run on Linux). Every claim below is labelled **observed** or **reasoned**; a claim about this repo's code was read from the code. Where a section says "this host" without naming one, it means VS Code Agents, the host most of this page was observed on.
+Three hosts run the same Copilot harness and load this plugin from its Claude-format manifest: VS Code Agents, the Copilot CLI (1.0.92-3) and the GitHub Copilot desktop app. All three were **observed** on Windows 11 with Git for Windows (Git Bash) and Windows PowerShell 5.1. macOS and Linux hosts are unverified: the test suite ran on Linux, no host did.
 
-This repo has no issue number for this port yet. Tests and fixtures that cover it carry the placeholder token `vscode` in their names instead (`tests/test_*_vscode.py`, `tests/fixtures/vscode-*`).
+On these hosts the memory recap is injected at SessionStart, the transcript is read from `~/.copilot/session-state/<uuid>/events.jsonl`, and saves go into the project's `.remember/`, shared with Claude Code sessions in the same project.
 
 ## Install
 
-Either route:
+- **`copilot plugin install Digital-Process-Tools/claude-remember`** (**reasoned**, not observed).
+- **VS Code:** set `"chat.pluginLocations": {"<absolute path to a checkout>": true}`, then run **Developer: Reload Window** (**observed**). VS Code runs hooks from a mirror copy and does not re-mirror a path that is already registered, so an in-place edit is not picked up; re-register under a new path to refresh.
+- **Copilot CLI:** `copilot --plugin-dir <checkout>`, or a local marketplace (`copilot plugin marketplace add <path>`, then `copilot plugin install`) (**observed**). The desktop app takes the same marketplace route (**observed**) and never lists the plugin under Installed.
 
-```
-copilot plugin install Digital-Process-Tools/claude-remember
-```
+## Requirements
 
-(the plugin lands under `~/.copilot/installed-plugins/_direct/...`), or the VS Code setting
+- Git for Windows: the hooks are bash. See [windows.md](windows.md).
+- `jq`. Without it nothing is injected on these hosts, and the log line names it.
+- The `claude` CLI on `PATH`. Summaries run through `claude -p`; there is no Copilot-native summarizer.
 
-```
-"chat.pluginLocations": {"<absolute path to a checkout>": true}
-```
+## How saving works here
 
-followed by **Developer: Reload Window**. The settings route is the one **observed** here; the `copilot plugin install` route is **reasoned**.
+These hosts send `SessionEnd` with `reason=complete` after every turn and nothing when the session closes, so the per-turn save is the only save. The save runs in the background; the turn does not wait for it. Set `cooldowns.turn_end_debounce_seconds` to choose between two behaviours (see [configuration.md](configuration.md)).
 
-- VS Code copies the plugin into its own mirror directory under `%APPDATA%\Code\agentPlugins\` and runs hooks **from the mirror**, not from the source folder (**observed**). A path that is already registered is not re-mirrored when its files change (**observed**), so an in-place edit of a checkout is not picked up; re-register under a new path (or reinstall) to refresh.
-- The Copilot CLI loads the plugin with `copilot --plugin-dir <checkout>`, or from a local directory marketplace (`copilot plugin marketplace add <path>`, then `copilot plugin install`), and runs hooks straight from that directory, with no mirror (**observed**). The desktop app was given the plugin through the same local-marketplace route (**observed**); it never lists such a plugin under Installed (**observed**).
-- No hooks manifest other than `hooks/hooks.json` is needed. VS Code reads the Claude-format manifest (**observed**). If a Copilot-native manifest (`.github/plugin/plugin.json` naming its own hooks file) is also present, VS Code loads only that one and sends a different, camelCase payload (**observed**); this plugin deliberately ships no such manifest.
-- On Windows you need Git for Windows (Git Bash) and `jq`, same as [windows.md](windows.md). Without `jq` nothing is injected on this host: the recap falls back to plain text, which VS Code does not inject, and the SessionStart hook logs `session-start: copilot host without jq, recap printed as plain text, which this host does not inject` so the silence is diagnosable (read from the code; pinned by `tests/test_session_start_copilot_stdout_vscode.py`).
-- Summaries run through the `claude` CLI (Claude Code's), which must be installed and on `PATH`; see **Summaries** below.
+**A. Immediate (default, `0`).** Each turn is saved as soon as it ends: one summarizer call per turn with new content (observed cost $0.0043-$0.0070 per call, Haiku through `claude -p`), and a loss window of only the few seconds the save takes.
 
-## How hooks are launched on Windows
-
-- **Observed:** VS Code runs a hook entry's `command` string through Windows PowerShell. There a bare `bash` can resolve to `C:\Windows\System32\bash.exe` (WSL) when System32 precedes Git on `PATH`: no Windows environment, no `/c/` paths, and the plugin's script is never reached. A `windows` override key is ignored.
-- **Observed:** a `powershell` key on the entry is honoured and replaces `command` (one invocation per entry). `hooks/hooks.json` therefore carries, next to each unchanged `command`, a `powershell` key of exactly this form:
-
-  ```
-  powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" <name>.sh; exit $LASTEXITCODE
-  ```
-
-  It starts a child Windows PowerShell that runs `scripts/run-hook.ps1` with the hook script's file name. The launcher locates Git Bash explicitly and runs the hook script with it, and returns bash's exit status; `exit $LASTEXITCODE` passes that exact status on. The launcher does not read stdin or stdout itself: bash inherits the launcher's own standard handles, so the payload reaches bash exactly as the host wrote it (nothing re-encoded, no line ending appended), end-of-file is the host's own, and when a host leaves stdin open the hook's own one-second bounded read applies. **Observed** on Windows in `tests/test_hooks_json.py`, for both the launcher alone and the full manifest value: the bytes bash reads are identical to the bytes written (non-ASCII and a mid-payload CR included, no trailing newline added), a payload over 1 MB arrives complete, and with stdin held open (for 30 s) a hook that reads with `read -t 1` and exits returns the launcher while stdin is still open, within the test's 20 s bound. `-NonInteractive` makes a launcher started without its script name fail (exit 1, a missing-parameter error on stderr) instead of prompting for it and taking the answer from the payload on stdin, which is what happens without the flag (both **observed**). `-NoLogo` does **not** keep the banner off stdout when `-File` names a file that does not exist (an unset or stale `CLAUDE_PLUGIN_ROOT`): Windows PowerShell 5.1 prints its banner to stdout and fails before any script runs, `-NoLogo` or not (**observed**). All three hosts set `CLAUDE_PLUGIN_ROOT` (**observed**), so this does not arise through the manifest on them.
-- **Launcher lookup order** (read from `scripts/run-hook.ps1`), first existing file wins:
-  1. `$env:REMEMBER_BASH`, if set (a path that does not exist, or names a directory, falls through to the next step);
-  2. `Git\bin\bash.exe` under `%ProgramW6432%` (the 64-bit Program Files, which a 32-bit PowerShell reports as `%ProgramFiles%` = `Program Files (x86)`);
-  3. the same under `%ProgramFiles%`;
-  4. the same under `%ProgramFiles(x86)%`;
-  5. the same under `%LOCALAPPDATA%\Programs` (skipped when `LOCALAPPDATA` is unset);
-  6. the first `bash.exe` on `PATH` whose path contains neither `System32` nor `WindowsApps` (WSL's launcher and its Microsoft Store alias).
-
-  If none is found it writes `claude-remember: Git Bash not found; install Git for Windows or set REMEMBER_BASH to bash.exe` to stderr and exits 0, so the hook does nothing rather than failing the session. Any other error inside the launcher itself (for example a `REMEMBER_BASH` that is a file but not a program) is written as `claude-remember: launcher error: ...` to stderr and also exits 0. Only bash's own exit status is forwarded, and the hook scripts exit 0 on every path. Inside the launcher the plugin root is taken from `CLAUDE_PLUGIN_ROOT`, then `COPILOT_PLUGIN_ROOT`, then the launcher's own parent directory -- but those two fallbacks apply only when the launcher is invoked directly. The manifest names the launcher through `$env:CLAUDE_PLUGIN_ROOT` and nothing else, so through the manifest the launcher is reached only when that variable is set (read from `hooks/hooks.json`).
-- **Constrained Language Mode** (the PowerShell mode AppLocker or WDAC script enforcement imposes): the launcher checks its language mode before any step that needs full language. Under Constrained Language Mode it skips the handle step below (refused there), runs the hook with Git Bash as usual, forwards its exit status, and writes `claude-remember: launcher: Constrained Language Mode; could not detach background work, the host will wait for it` to stderr; the error path also exits 0 there. That line goes through `Write-Error`, not `Write-Warning`: Windows PowerShell 5.1 writes the warning stream to stdout, in front of a SessionStart hook's JSON (**observed**). **Observed by simulation** in `tests/test_hooks_json.py`, Windows only: the session's language mode is set to `ConstrainedLanguage` in process and the launcher is called in that session. Setting `__PSLockdownPolicy=4` in a child process's environment did not engage Constrained Language Mode on this machine (the child reported `FullLanguage`, **observed**), so a real AppLocker / WDAC policy was not exercised.
-- **Background work must not hold the hook's output open.** The hooks return at once and leave their work (the save, a due consolidation) to a detached background child; the host treats the hook as finished only when its stdout reaches end-of-file (shown for a Python caller in the test harness; **observed** for VS Code on 2026-10-03: before the fix each hook's duration matched the background work it started, and after it the durations dropped to the hook's own run time, exactly as predicted -- see the duration table under [Verification](#verification)). Windows PowerShell 5.1 holds an extra, inheritable duplicate of its own stdout handle (present from the start of the script, not created by the launcher), and every process it starts -- bash, and through bash every background child -- inherits every inheritable handle. So the detached child kept a copy of the host's stdout pipe and the host waited for it to finish: `powershell.exe` itself exited in 0.4 s while the caller's stdout stayed open for the child's full 20 s, and changing how the launcher starts bash (a captured pipeline, `System.Diagnostics.Process` with redirected streams, `cmd /c` with file redirections) did not help, because each of those still inherits the duplicate (all **observed** in a test harness on Windows 11, Git Bash 5.2.37). Before starting bash the launcher therefore clears the inherit flag on every handle it holds except its three standard ones, which bash receives as its own stdio and does not pass on to a child whose stdio it redirected (**observed**: Git Bash started directly with piped stdio returns at once with the same background child). That step compiles a few lines of C# with `Add-Type` (about 0.15-0.25 s added per hook here). The helper is compiled in memory: with `TEMP` pointing at a directory that does not exist it still compiled and ran, and it left no files in `%TEMP%` (**observed**); `Add-Type` still starts `csc.exe` to compile it (**reasoned**). The step is best effort, so where it fails the launcher writes `claude-remember: launcher: could not detach background work (...); the host will wait for it` to stderr, the hook still runs, and the host just waits for the background work, as before. `tests/test_hooks_json.py` pins a 15 s background child against a 10 s return bound (a broken launcher is held for the full 15 s), with a foreground-sleep positive control.
-- **Execution policy:** the entry passes `-ExecutionPolicy Bypass` to the child PowerShell, so a `Restricted` (the Windows client default) or `RemoteSigned` policy on the shell VS Code starts does not block it. **Observed** by simulation with `-ExecutionPolicy Restricted` on the outer shell: each manifest value reached its script with the payload intact, while the earlier `& "...\run-hook.ps1"` form failed under the same simulation with `PSSecurityException`. A real `CurrentUser` / `LocalMachine` setting and `RemoteSigned` were not simulated; that the child's `-ExecutionPolicy Bypass` outranks them follows from PowerShell's documented scope precedence (**reasoned**). A policy enforced by Group Policy (the `MachinePolicy` / `UserPolicy` scopes) takes precedence over `-ExecutionPolicy` and cannot be overridden this way (**not observed**). The live run's machine has `LocalMachine=Unrestricted`.
-- `claude plugin validate` accepts the manifest with the `powershell` keys (**observed**; re-run from the repo root on the current `-NoLogo -NoProfile -NonInteractive` form: "Validation passed with warnings", the one warning being that a `CLAUDE.md` at the plugin root is not loaded as context, unrelated to the hooks). That Claude Code ignores the key at run time and keeps using `command` is **reasoned** (the validator accepts it and the `command` strings are byte-for-byte unchanged), not observed in a Claude Code session. macOS/Linux VS Code is expected to use `command` (**reasoned**).
-
-## What VS Code sends, and what this plugin does with it
-
-- **Payload on stdin** (observed) is snake_case: `hook_event_name`, `session_id`, `cwd`, `timestamp`; plus `source` and `initial_prompt` (SessionStart), `prompt` (UserPromptSubmit), `tool_name` / `tool_input` / `tool_result` (PostToolUse), `reason` (SessionEnd). There is no `transcript_path`. A captured payload is `tests/fixtures/vscode-hook-stdin-vscode.json`.
-- **`session_id`** is a bare uuid on the plugin-hook path (observed 2026-09-30 in VS Code, and 2026-10-03 in the Copilot CLI). A prefixed form, `agent-host-copilotcli:/<uuid>`, was seen in the extension-host hook log on 2026-09-29. The hooks call `remember_session_id_resolve` (`scripts/lib-session-id.sh`), which strips that prefix before the hooks' character-allowlist validators, so both forms are handled; an id that is not safe once the prefix is gone (for example `agent-host-x:/../../x`) is emptied by those validators, and the hook runs as for a missing id (pinned end to end for SessionStart, PostToolUse and SessionEnd by the `*_vscode` hook tests).
-- **Environment** (observed): `CLAUDE_PLUGIN_ROOT`, `COPILOT_PLUGIN_ROOT` and `PLUGIN_ROOT` (all the mirror path, backslash-separated), `CLAUDE_PROJECT_DIR` and `COPILOT_PROJECT_DIR` (the project), `COPILOT_HOME`, `COPILOT_CLI=1`, `AI_AGENT=github_copilot_vscode_agent`. The Copilot CLI's hooks carry `COPILOT_CLI=1`, `COPILOT_PLUGIN_ROOT`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PROJECT_DIR` too (observed). Host detection (`COPILOT.signature_vars` in `pipeline/host.py`, and `remember_session_id_resolve` in `scripts/lib-session-id.sh`) keys on `COPILOT_CLI` / `COPILOT_PLUGIN_ROOT`, not `COPILOT_HOME`. The shell hint has two arms (read from the code): a session id with the `agent-host-*:/` prefix sets the `copilot` hint regardless of any other signature in the environment; only the environment arm yields, to the signature of any host registered before Copilot in `pipeline/host.REGISTRY` (Claude Code, Codex, Antigravity), matching the Python check. The captured environment is `tests/fixtures/vscode-env-vscode.txt`.
-- **Transcript:** `~/.copilot/session-state/<uuid>/events.jsonl` (or under `$COPILOT_HOME`), one JSON object per line with a dotted `type` and a `data` object (observed; sample in `tests/fixtures/vscode-events.jsonl`). It is found by file existence, not by host detection: `find_session` in `pipeline/extract.py` and `post-tool-hook.sh` both look up the stdin uuid via `copilot_transcript_for` (`pipeline/host.py`) / `remember_copilot_transcript_for` (shell mirror). `sniff_envelope` reports such a file as `"copilot"` and `copilot_exchange` turns each line into a `(role, text)` exchange.
-- **SessionStart stdout:** on this host the memory recap is emitted as `{"additionalContext": "<recap>"}` (the emit branch at the end of `scripts/session-start-hook.sh`, taken when `REMEMBER_HOST_HINT=copilot` and `jq` is available; otherwise the plain recap is printed, which this host does not inject). Every such plain-text fallback on the copilot hint is logged, so the silence is diagnosable (read from the code; each pinned by `tests/test_session_start_copilot_stdout_vscode.py`, observed on Windows and Linux): without `jq`, `session-start: copilot host without jq, recap printed as plain text, ...`; when the envelope's own `jq` call fails, `session-start: copilot envelope could not be built, recap printed as plain text, ...`; and when the recap was never buffered (a `REMEMBER_TRACE` run, or `tmp/` not writable), `session-start: copilot host, recap not buffered (trace on or tmp/ not writable), printed as plain text, ...`. **Observed:** of three shapes emitted in one hook entry, only the top-level `additionalContext` reached the model; `hookSpecificOutput.additionalContext` and plain text did not. Caveat: the shapes were emitted by consecutive commands, so "unsupported" and "a later command's output wins" could not be separated.
-- **Summaries** run through the `claude` CLI on this host (`claude -p`), so Claude Code's CLI must be installed and on `PATH`; there is no Copilot-native summarizer. The save log records `provider: claude` (**observed**). `_choose_summarizer_provider` in `pipeline/haiku.py` has an explicit warning for a Copilot transcript falling back to `claude`, but it is only logged when a transcript path is supplied to the pipeline (`REMEMBER_TRANSCRIPT_PATH`), which VS Code does not do (**observed**: the live run's save log shows `provider: claude` and no such warning).
-- **`.remember/`** is the project's usual directory, shared with Claude Code sessions in the same project. In the Copilot desktop app, a session with a Project attached uses that project's `.remember/` (**observed**); a session without one runs in the app's own chat workspace, `~/.copilot/chats/<date>/<slug>/`, and the plugin bootstraps a fresh `.remember/` there (**observed**), so that session's memory is not the project's.
-- `scripts/doctor.sh` prints an `OK   copilot session-state dir present` line when `~/.copilot/session-state` (or `$COPILOT_HOME/session-state`) exists.
-- **`scripts/doctor.sh` on a project used only through VS Code Agents.** Such a project never gets Claude Code's transcript directory (`~/.claude/projects/<slug>`), so the Paths section still prints `FAIL Session dir MISSING`. When the session id recorded with the last successful save names an existing `<COPILOT_HOME or ~/.copilot>/session-state/<uuid>/events.jsonl`, doctor prints `OK   last save came from a VS Code Agents / Copilot session (<path>); Claude Code's transcript dir is not expected (issue: vscode)` and the verdict reads `capture is working` (or the summarizer verdict) instead of the #144 slug-mismatch verdict. Without such a transcript the #144 verdict is unchanged. The session id is read with `jq`, so without `jq` the Copilot check does not run and the old verdict stands. (Read from the code and pinned by `tests/test_doctor_copilot_only_project_vscode.py`, **observed** under Git Bash on Windows and under bash on Linux in WSL; **reasoned** for macOS. Before this check, a Copilot-only project got the #144 verdict; that is reproduced by the same test, not observed in a live VS Code project, since the live project also has a Claude Code history.)
-
-## Verification
-
-| Host | Version | Dates | Platform |
-| --- | --- | --- | --- |
-| VS Code Agents | 1.139.1 for the 2026-09-30 probes; `code --version` reported 1.140.0 on 2026-09-30 after the window reloads; not re-recorded for the 2026-10-03 runs, and the running window's version was never confirmed | 2026-09-30, 2026-10-03 | Windows 11 |
-| Copilot CLI | 1.0.92-3 | 2026-10-03 | Windows 11 |
-| Copilot desktop app | runtime `copilotVersion 0.0.0`; the app's own version was not determined | 2026-10-03 | Windows 11 |
-| (test suite only, no host) | -- | 2026-10-03 | Linux: WSL Ubuntu 26.04, Python 3.14 (see [Linux](#linux-the-test-suite)) |
-
-All on Windows 11 with Git for Windows bash 5.2.37 and Windows PowerShell 5.1. No host was run on macOS or Linux.
-
-### 2026-09-30: VS Code Agents, first live runs
-
-**Observed** on 2026-09-30: three agent sessions on the Copilot harness, run against an existing project that already had a `.remember/` directory written by Claude Code. The plugin was a `git archive` export (LF line endings) of commit 39d1610, registered through `chat.pluginLocations` and followed by a window reload; VS Code ran the hooks from its mirror under `%APPDATA%\Code\agentPlugins\`. The earlier probes were recorded against VS Code 1.139.1; `code --version` reported 1.140.0 after these sessions and the window reloads, and the running window's version was not separately confirmed. That commit's `powershell` entries used the earlier `& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" <name>.sh` form; the `powershell ... -File ...` form was not used in these three sessions; its live runs on 2026-10-03 are recorded [below](#2026-10-03-vs-code-agents-the-launcher-entry-and-its-detach-fix).
-
-| Event | Fired | Notes |
-| --- | --- | --- |
-| SessionStart | yes | Fired once per session, in each of the three sessions. The harness recorded the output as `{"additionalContext": ...}` of 5,780 characters, and the model's first reply listed the day file, `now.md`, `recent.md`, `archive.md`, the last handoff and the history note, so the recap reached the model. Hook log: `session-start took 2s`. |
-| UserPromptSubmit | yes | Fired on every turn and exited successfully. Its output does not reach the model on this host (see Known gaps). |
-| PostToolUse | yes | Fired once per tool call in all three sessions (1, 1 and 2 calls). Log line: `post-tool: copilot transcript .../.copilot/session-state/<uuid>/events.jsonl`. |
-| SessionEnd | yes | Fired after every turn, not once per session, with `reason=complete` in every firing observed (four, across three sessions) (see [Saves per turn](#saves-per-turn-two-behaviours)). Each firing ran the forced save: `extract`, then the summarizer (`provider: claude`), then a position update. |
-
-End to end (**observed**):
-
-- **Recap injected.** In session 1 the model could name the memory sections from the SessionStart context.
-- **`scripts/doctor.sh`**, run against the project after session 1 (its timestamp precedes session 3's write): `VERDICT: capture is working -- last save 2026-09-30 21:13:09`.
-- **Two sessions were SKIPped by the summarizer.** Session 1 (a question about the memory sections, then a command printing `hello`) and session 2 (one read-only turn that read the README and summarised it) were each extracted, and the position advanced after each SKIP (observed in the log for both sessions; session 2's log shows `position -> 25`), but the summarizer returned `SKIP` and nothing was written to `now.md`. Session 2's extract was inspected by re-running the extractor on its transcript: three exchanges (the prompt, the tool-only assistant turn rendered as a `[TOOL: ...]` line, and the answer) with the right roles, matching the conversation. Session 1's extract content was not inspected. The save prompt tells the model to return `SKIP` for a span with no substantive work, and it treated these that way (**observed** that it did; the reading that this is the prompt's intended judgement and not a capture failure is **reasoned**, from the prompt text and from session 3 writing normally).
-- **Save written to the shared timeline.** In session 3, one turn that created a small file in the project: `extract` found 4 exchanges (1 human), the summarizer returned an entry (`[write] appended (provider: claude): ## 21:21 | <branch>`), the position advanced (`[write] position -> 34`), and the regular compression step moved the entry from `now.md` into the day file (`now.md -> today-2026-09-30.md`, `752->360b`). The day file holds a one-line entry naming the file that session created. This is the first observation of a VS Code Agents session being summarised into the same `.remember/` timeline Claude Code uses.
-Not observed on 2026-09-30: macOS, Linux, the standalone Copilot CLI, and any session shape beyond these three.
-
-### 2026-10-03: VS Code Agents, the launcher entry and its detach fix
-
-**Observed** on 2026-10-03 (the VS Code version was not re-recorded, see the table above), against the same project, with the plugin again a `git archive` export registered through `chat.pluginLocations`. The runs before the launcher fix used an export of d54685c; the runs after it used exports of 3311c67 (which contains the fix, 07c0e7d), and a final round used an export of b40bf48. All three carry the `powershell -NoProfile -ExecutionPolicy Bypass -File ... run-hook.ps1` entries; `-NoLogo -NonInteractive`, and the launcher's stdin inheritance, its console-encoding setup (reduced to the stdout encoding only, UTF-8, for its own stderr lines) and Constrained Language Mode path, were added after these runs (and after the Copilot CLI and desktop app runs below) and have not been run live in any host; they are covered by the Windows tests named above.
-
-| Event | Fired | Notes (exports of d54685c, 3311c67 and b40bf48) |
-| --- | --- | --- |
-| SessionStart | yes | Ran through the launcher from VS Code's mirror directory, like every hook below. Injected the recap as `{"additionalContext": ...}` (5,009 characters on d54685c, 4,802 on 3311c67, 2,564 on b40bf48, where upstream's #842 handoff redelivery cap held back a handoff already delivered many times); in the d54685c and 3311c67 runs the model listed the memory sections. |
-| UserPromptSubmit | yes | Ran through the launcher. Its output still does not reach the model (see Known gaps). |
-| PostToolUse | yes | Resolved the Copilot transcript (`.../.copilot/session-state/<uuid>/events.jsonl`). |
-| SessionEnd | yes | Fired after every turn, as on 2026-09-30. |
-
-**Hook durations, before and after the launcher detach fix** (07c0e7d), from the harness's own `hook.start` / `hook.end` records in `events.jsonl`. Before the fix each hook took as long as the work it had put in the background, so the model's turn waited for the whole save and the UI showed the next prompt as queued ("steering") until then. After it, each hook took only its own run time, and the second prompt of a burst was no longer queued behind the first turn's save. All **observed**:
-
-| Hook | What it puts in the background | Before (d54685c) | After (3311c67, then b40bf48) |
-| --- | --- | --- | --- |
-| SessionStart, daily consolidation due | consolidation (a summarizer call, ~35 s) | 40.0 s (one session) | not recorded |
-| SessionStart | -- (nothing due) | 2.6-2.7 s | 2.7 s, 2.9 s (3311c67) and 3.0 s (b40bf48), one session each |
-| SessionEnd, default | forced save: extract + summarizer (~5 s) | 7.4 s and 8.5 s (one session, two turns) | 0.7 s (3311c67, session A, two turns); 0.9-1.0 s (b40bf48, two turns) |
-| SessionEnd, after a session that wrote a file | forced save + compression (~45 s) | 55.1 s (one session) | not recorded |
-| SessionEnd, `turn_end_debounce_seconds=30` | 30 s sleep + forced save | 38-39 s (three sessions) | 0.7 s (3311c67, session B, two turns) |
-| PostToolUse | background save | 1.1-1.7 s (four firings) | 1.5 s (3311c67) and 2.5 s (b40bf48) |
-
-In session B the second prompt was sent 8.2 s after the first reply (harness timestamps) and was not held.
-
-The cause is the inherited stdout handle described under [How hooks are launched on Windows](#how-hooks-are-launched-on-windows). The fix was first shown in the test harness -- the real `scripts/session-end-hook.sh`, with a stub save that sleeps 10 s, returned through the launcher in 0.7 s (`-File`) and 0.9 s (the full manifest form) instead of 11.8 s, and the save still completed about 11 s later -- and the VS Code durations above dropped exactly as that predicted.
-
-The saves themselves for these runs are described under [Saves per turn](#saves-per-turn-two-behaviours).
-
-### 2026-10-03: Copilot CLI
-
-**Observed** with Copilot CLI 1.0.92-3, the plugin loaded with `--plugin-dir` and, separately, from a local directory marketplace:
-
-- The hooks ran through `scripts/run-hook.ps1` straight from that directory (no mirror). The payload was snake_case with a bare uuid `session_id`, and the hooks' environment carried `COPILOT_CLI=1`, `COPILOT_PLUGIN_ROOT`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PROJECT_DIR`.
-- SessionStart took 2.6-2.7 s and SessionEnd 0.8 s. The recap was injected: the model listed the memory files.
-- A probe hook emitting several shapes showed that the CLI injects a top-level `additionalContext` for SessionStart **and** for UserPromptSubmit (VS Code does not for the latter); `hookSpecificOutput.additionalContext` and plain text were not injected.
-- When another installed plugin's hook failed in the same batch, the CLI dropped the whole batch's output, this plugin's recap included (VS Code keeps it); see Known gaps.
-- A `copilot` started from inside a Claude Code session inherits its `CLAUDE_CODE_*` variables, so the hint resolves to Claude Code and the recap goes out as plain text, which the CLI does not inject (the nested-session gap under Known gaps, observed here). With those variables removed from the environment the recap was injected.
-
-### 2026-10-03: Copilot desktop app
-
-**Observed** with the GitHub Copilot desktop app (runtime `copilotVersion 0.0.0`; app version not determined), the plugin given through a local directory marketplace: every hook fired through the launcher (SessionStart 2.2 s, SessionEnd 0.7 s, PostToolUse 1.4 s), the Copilot transcript was resolved and the saves ran. A session without an attached Project runs in the app's own chat workspace, `~/.copilot/chats/<date>/<slug>/`, and the plugin bootstrapped a fresh `.remember/` there; with a Project attached, the project's `.remember/` was used.
-
-### Linux: the test suite
-
-No host was run on Linux. The test suite was (**observed** on WSL Ubuntu 26.04, Python 3.14, against a git-backed `git archive` export of b40bf48 with a Linux-only `PATH`): 9 failed / 3,308 passed / 75 skipped, against 6 failed / 3,169 passed / 60 skipped for `origin/main` (9e78169) in the same setup. Six of the nine also fail on `main` (`test_lock_primitive::test_no_two_holders_overlap`, four cases, and two `test_migration_hardening_766` missing-git cases), so they are not this port's. The other three were this port's and are fixed: the `test_scripts_use_jq_var_not_hardcoded` lint, tripped by the word `jq` in a log line, and two SessionStart plain-text controls that switched promos off through an environment variable nothing reads. Every `*_vscode` module and the two detach modules ran on Linux rather than skipping. After those fixes the same setup (a git-backed export of the fixed tree) gave 4 failed / 3,331 passed / 87 skipped, the four being the `test_lock_primitive` cases that also fail on `main` (**observed**).
-
-## Saves per turn: two behaviours
-
-What this host does (**observed** in the three sessions of 2026-09-30, and again on 2026-10-03): it sends `SessionEnd` with `reason=complete` after every turn, and sends nothing when the session is closed. There is therefore no later end signal to save on. A turn that its own `SessionEnd` does not save is not saved by anything else: the next session has a new id, and start-up recovery reads only Claude Code's transcript directory (read from the code). The hook's forced save bypasses the cooldown and minimum-message gates, so by default the summarizer runs once per turn. Saves are incremental (**observed**: the position advances between firings and nothing was duplicated).
-
-You can choose between two behaviours with `cooldowns.turn_end_debounce_seconds`:
-
-- **A. Immediate (default, `0`).** Every turn is saved as soon as its `SessionEnd` arrives: one summarizer call per turn that has new content (observed cost $0.0043-$0.0070 per call, Haiku through `claude -p`), and a loss window of only the few seconds the save itself takes. **Observed** in the live runs described under Verification (2026-09-30, and re-observed on 2026-10-03: one immediate save per turn). The save runs in the background and the turn does not wait for it: before the launcher fix VS Code held each turn for the whole save (7.4 s and 8.5 s), after it `SessionEnd` returned in 0.7-1.0 s (both **observed**, see the duration table under Verification).
-- **B. Debounced (`N` > 0).** Each turn's save waits `N` seconds in the background (the wait does not hold the turn: before the launcher fix it did, 38-39 s with `N`=30; after it `SessionEnd` returned in 0.7 s, both **observed**), then runs only if no later turn of the same session has ended in the meantime. A burst of turns is saved once, `N` seconds after its last turn: one summarizer call per burst instead of one per turn, and one summary covering the whole burst rather than several fragments. The cost is a loss window of `N` seconds: if the machine sleeps or VS Code is killed inside it, that burst can go unsaved, and only a later turn in the same session would save it. The daily log records `session-end: turn-end save deferred Ns (cooldowns.turn_end_debounce_seconds)` when a save is scheduled and `session-end: turn-end save superseded by a later turn` when one stands down. During the window, `tmp/save-session.pid` names the sleeping save, so PostToolUse delta saves are suppressed until it finishes; for that reason `N` is capped at 3600, and a larger value is used as 3600 with a `session-end: cooldowns.turn_end_debounce_seconds=<N> clamped to 3600` log line on each firing (read from the code; the clamp is pinned by the test module below). **Observed live** on 2026-10-03 with `N`=30: a two-turn burst (the second prompt sent 8.2 s after the first reply, by the harness timestamps) logged `turn-end save deferred 30s` twice, then `turn-end save superseded by a later turn` for the first turn, and one save ran 30 s after the second turn, covering both turns (4 exchanges, 2 human). Also pinned by `tests/test_session_end_turn_debounce_vscode.py`, which drives the real hook (observed passing under Git Bash on Windows and under bash on Linux in WSL; macOS is reasoned).
-
-To turn B on, put this in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project); 30 is an example:
+**B. Debounced (`N` > 0).** Each turn's save waits `N` seconds and stands down if a later turn of the same session ends meanwhile, so a burst of turns is saved once, `N` seconds after its last turn, as one summary. The cost is a loss window of `N` seconds: if the machine sleeps or VS Code is killed inside it, that burst can go unsaved, and only a later turn in the same session would save it. Put this in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project); 30 is an example:
 
 ```json
 {
@@ -163,24 +36,36 @@ To turn B on, put this in `~/.remember/config.json` (all projects) or `<project>
 }
 ```
 
-To turn it off again, set the key to `0` or delete the file; both work from v0.37.0. Before that, deleting a per-project `config.json` left the merged-config cache serving the old value (**observed** on v0.36.0: the key stayed at 30 after the file was removed); upstream fixed the cache in v0.37.0 (#843, commit 7a8f415), which this port includes (**observed**: 30, then 0 after deleting the layer).
+The daily log records `session-end: turn-end save deferred Ns (cooldowns.turn_end_debounce_seconds)` when a save is scheduled and `session-end: turn-end save superseded by a later turn` when one stands down. `N` is capped at 3600. To turn it off, set the key to `0` or delete the file (v0.37.0+).
 
-Other hosts are unaffected: the debounce applies only under the `copilot` host hint (VS Code Agents; the standalone Copilot CLI too, if it sends `complete` — unverified) and only when the reason is `complete`. Claude Code, Codex and the rest, and any other `SessionEnd` reason, keep the immediate save whatever the key says. A value that is not a plain non-negative integer is read as `0`. See also [configuration.md](configuration.md).
+Other hosts are unaffected: the debounce applies only under the `copilot` host hint (VS Code Agents; the Copilot CLI too, if it sends `complete`, which is unverified) and only for `reason=complete`.
 
-## Known gaps
+## Troubleshooting
 
-- **SessionEnd fires after every turn on this host, and nothing fires on close**; see [Saves per turn](#saves-per-turn-two-behaviours) for the two behaviours this allows.
-- The harness reports the merged SessionStart result as failed (`success=false`) when any other installed plugin's SessionStart hook fails (**observed**: another plugin's hook failed under PowerShell in every session); this plugin's context was still injected.
-- UserPromptSubmit output does not reach the model in VS Code (**observed**: neither a `hookSpecificOutput` nor a top-level `additionalContext` from the plugin's UserPromptSubmit hook was injected). The Copilot CLI does inject a top-level `additionalContext` for UserPromptSubmit (**observed** with a probe hook), but `scripts/user-prompt-hook.sh` emits no such envelope on the copilot hint (read from the code), so nothing it prints reaches the model in the CLI either, today. A copilot UserPromptSubmit envelope is a follow-up.
-- With another installed plugin's hook failing in the same batch, the Copilot CLI drops the whole batch's output, this plugin's SessionStart recap included (**observed**); VS Code keeps it.
-- Constrained Language Mode (AppLocker / WDAC script enforcement): the launcher cannot detach the hooks' background work there, so the host waits for each save, as before the launcher fix; the hook itself still runs and its exit status is forwarded (**observed by simulation** on Windows PowerShell 5.1, see [How hooks are launched on Windows](#how-hooks-are-launched-on-windows); a real AppLocker / WDAC policy was not tried).
-- Gemini CLI has no signature in `pipeline/host.REGISTRY`, so a Gemini session launched from a shell that exports `COPILOT_CLI` would get the copilot hint, and its recap the copilot envelope (**reasoned**, not observed).
-- `scripts/doctor.sh` on a mixed project: when the last save came from a Copilot session, doctor reads `capture is working` even if the project's Claude Code slug is genuinely mismatched (#144): the Copilot transcript satisfies the same guard that a present Claude Code session dir would, and only the earlier `FAIL Session dir MISSING` line hints otherwise (**reasoned** from the code, not observed).
-- Promos (`systemMessage`) are not emitted on this host; the emit branch skips them on purpose, as `systemMessage` was not probed (**reasoned** from the code; no test or live run shows it).
-- Each hook firing starts one extra Windows PowerShell process (the child that carries `-ExecutionPolicy Bypass`) on top of the shell VS Code starts: a per-hook startup cost. In the test harness on one machine, a trivial hook through the launcher alone took about 0.5 s (0.36 s before the handle step was added; the step adds about 0.15-0.25 s end to end), and the full manifest form about 0.2 s more (**observed** there, not measured in VS Code).
-- An execution policy enforced by Group Policy (`MachinePolicy` / `UserPolicy` scope) overrides `-ExecutionPolicy Bypass`, so under such a policy the launcher cannot run (**not observed**).
-- The recovery-token path that upstream v0.39.0 moved to `plugin.json` `userConfig` (#860, the `oauth_token` option) is unverified under VS Code: whether this host offers or passes that option to hooks was not checked (**not observed**).
-- Upstream's total SessionStart byte budget (#842, `thresholds.session_start_max_bytes`, default 9,000 bytes) is measured on the plain-text recap's handoff and memory sections, before this host's JSON envelope wraps the recap; JSON escaping can make the injected string somewhat longer than the budget (**reasoned** from the code; the recaps observed here, 4,802 and 5,009 characters, were under it).
-- A Copilot host started from inside a Claude Code shell inherits `CLAUDE_CODE_*`; the host hint then resolves to Claude Code and the recap is emitted as plain text, which the host does not inject (**observed** for the Copilot CLI on 2026-10-03; **reasoned** for VS Code).
-- In `cooldowns.turn_end_debounce_seconds` mode, PostToolUse delta saves are suppressed while a deferred save sleeps (its pid holds `tmp/save-session.pid`), which is why the window is capped at 3600 s (read from the code).
-- macOS and Linux hosts (VS Code, the Copilot CLI, the desktop app): unverified.
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Nothing injected at SessionStart | No `jq`; or copilot was started from inside a Claude Code shell, which inherits `CLAUDE_CODE_*` and sends the recap as plain text (observed for the CLI) | Install `jq`; start copilot from a clean shell |
+| A hook does nothing; stderr says `Git Bash not found` | No Git Bash found | Install Git for Windows, or set `REMEMBER_BASH` to `bash.exe` |
+| `scripts/doctor.sh` prints `FAIL Session dir MISSING` | Expected on a Copilot-only project | Read the verdict line: `capture is working` plus `last save came from a VS Code Agents / Copilot session`. Needs `jq` |
+| The harness shows SessionStart `success=false` | Another plugin's hook failed | In VS Code this plugin's context is still injected; in the CLI the whole batch's output is dropped. Fix the other plugin |
+| The desktop app saved into `~/.copilot/chats/<date>/<slug>/.remember` | No Project was attached to the session | Attach a Project |
+
+## Limitations
+
+- UserPromptSubmit output is not injected: never in VS Code; the CLI would, but the hook emits no envelope yet.
+- The Copilot CLI drops the whole hook batch when a sibling plugin's hook fails.
+- Under Constrained Language Mode (AppLocker or WDAC) the hooks run, but the host waits for each save (observed by simulation).
+- An execution policy enforced by Group Policy blocks the launcher (not observed).
+- Promos are not shown on these hosts (reasoned from the code).
+- macOS and Linux hosts are unverified.
+
+## Follow-ups
+
+Not done in this port; details in [vscode-verification.md](vscode-verification.md#coverage-gaps-and-follow-ups).
+
+- A UserPromptSubmit envelope for the copilot host (the CLI injects it).
+- Gemini CLI has no registry signature, so a shell exporting `COPILOT_CLI` would mis-hint it.
+- Doctor on a mixed project can mask a real #144 mismatch when the last save was a Copilot one.
+- The VS Code version for the 2026-10-03 runs was not recorded.
+
+Tests and fixtures for this port carry the placeholder token `vscode` in their names (`tests/test_*_vscode.py`, `tests/fixtures/vscode-*`).
