@@ -701,6 +701,33 @@ else
     echo "FAIL No save has ever completed for this project (no $_LAST_SAVE_FILE)"
 fi
 
+# issue: vscode -- Claude Code's transcript directory ($_SESSION_DIR, Paths
+# section) is evidence about capture only when the last successful save came
+# from a Claude Code session. A project driven only through VS Code Agents (or
+# the Copilot CLI) never gets that directory -- its transcript is
+# <COPILOT_HOME or ~/.copilot>/session-state/<uuid>/events.jsonl -- so without
+# this the verdict ladder below read a healthy project with real saves as a
+# #144 slug mismatch. Resolved with the same lookup the hooks use
+# (lib-session-id.sh), against the session id last-save.json recorded. Every
+# failure here (no jq above, so no id; the library missing) leaves the variable
+# empty, which is exactly the pre-existing behaviour -- never an abort.
+_COPILOT_LAST_SAVE_TRANSCRIPT=""
+if [ -n "${_LS_SESSION:-}" ]; then
+    if ! command -v remember_copilot_transcript_for >/dev/null 2>&1; then
+        source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null || true
+    fi
+    if command -v remember_copilot_transcript_for >/dev/null 2>&1; then
+        # Prints nothing when the file is absent or the id is refused (its own
+        # allowlist rejects '/', '\', ':', '.' and '..'); the scrub is the same
+        # #727 guard the .session read above applies, since COPILOT_HOME is
+        # spliced into a column-0 line commands/doctor.md relays verbatim.
+        _COPILOT_LAST_SAVE_TRANSCRIPT=$(remember_copilot_transcript_for "$_LS_SESSION" 2>/dev/null | tr -d '[:cntrl:]')
+    fi
+fi
+if [ -n "$_COPILOT_LAST_SAVE_TRANSCRIPT" ]; then
+    echo "OK   last save came from a VS Code Agents / Copilot session ($_COPILOT_LAST_SAVE_TRANSCRIPT); Claude Code's transcript dir is not expected (issue: vscode)"
+fi
+
 _MEMORY_FILE_COUNT=0
 _MEMORY_BYTES=0
 if [ -d "$REMEMBER_DIR" ]; then
@@ -1188,7 +1215,7 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ] \
-    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
+    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ] || [ -n "$_COPILOT_LAST_SAVE_TRANSCRIPT" ]; }; then
     # #870: this arm shares its base condition with "capture is working"
     # below on purpose -- it exists ONLY to override that one verdict when
     # the cursor-mtime check cannot tell a real append apart from a
@@ -1209,14 +1236,22 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARI
     # is the exact guard the promoted PostToolUse-fired-no-save arm above
     # already uses for this same reason -- copied here rather than
     # reinvented, so a slug mismatch always falls through to its own arm.
+    #
+    # issue: vscode: a non-empty $_COPILOT_LAST_SAVE_TRANSCRIPT also satisfies
+    # that clause -- the last save came from a VS Code Agents / Copilot
+    # session, whose transcript is not under Claude Code's projects dir, so a
+    # missing $_SESSION_DIR says nothing about it (see the capture-health
+    # block). Without a Copilot transcript the clause reads exactly as before.
     echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] \
-    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
+    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ] || [ -n "$_COPILOT_LAST_SAVE_TRANSCRIPT" ]; }; then
     # #880: same guard as the #870 arm immediately above, and for the same
     # reason -- a stale $_LAST_SAVE_TIME from a save that completed before a
     # rename/move can be non-empty even when the session dir no longer
     # matches Claude Code's own slug, so without this clause this arm fires
-    # ahead of the #144 slug-mismatch arm below and masks it.
+    # ahead of the #144 slug-mismatch arm below and masks it. The Copilot
+    # term (issue: vscode) is the same one as in the #870 arm: the #144 arm
+    # below is reached only when the last save was NOT a Copilot session.
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
     echo "VERDICT: problem -- session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
