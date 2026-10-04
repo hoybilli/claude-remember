@@ -47,6 +47,35 @@ try {
     if (-not $root) { $root = Split-Path -Parent $PSScriptRoot }
     $target = (Join-Path (Join-Path $root 'scripts') $Script).Replace('\', '/')
 
+    # The hooks return at once and leave their work to a detached background
+    # child; the caller waits for this process's stdout to reach EOF. Windows
+    # PowerShell 5.1 holds an extra inheritable duplicate of its stdout handle,
+    # and everything it starts -- bash, then every child bash starts -- inherits
+    # every inheritable handle, so that child would keep the caller's pipe open
+    # until it finished. Clear the inherit flag on every handle but the three
+    # standard ones (which bash receives as its own stdio and does not pass to a
+    # child whose fds it redirected). Best effort: if this step fails (e.g.
+    # Add-Type cannot compile), the hook still runs and the caller just waits
+    # for the background work, as it did before.
+    try {
+        if (-not ('ClaudeRemember.Handles' -as [type])) {
+            Add-Type -Namespace ClaudeRemember -Name Handles -MemberDefinition @'
+[DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] static extern bool GetHandleInformation(IntPtr h, out uint flags);
+[DllImport("kernel32.dll")] static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+public static void KeepOnlyStdioInheritable() {
+    long i = GetStdHandle(-10).ToInt64(), o = GetStdHandle(-11).ToInt64(), e = GetStdHandle(-12).ToInt64();
+    for (long v = 4; v < 0x100000; v += 4) {
+        if (v == i || v == o || v == e) continue;
+        uint flags; IntPtr h = new IntPtr(v);
+        if (GetHandleInformation(h, out flags) && (flags & 1) != 0) SetHandleInformation(h, 1, 0);
+    }
+}
+'@
+        }
+        [ClaudeRemember.Handles]::KeepOnlyStdioInheritable()
+    } catch { }
+
     $payload = [Console]::In.ReadToEnd()
     $payload | & $bash $target @Rest
     exit $LASTEXITCODE

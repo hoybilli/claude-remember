@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -670,6 +671,135 @@ def test_launcher_error_exits_zero(tmp_path):
     result = _run_launcher_file(root, "probe.sh", _launcher_env(root, {"REMEMBER_BASH": str(bogus)}))
     assert result.returncode == 0, result.stderr
     assert b"claude-remember: launcher error" in result.stderr
+
+
+# The hooks return at once and leave their work (a save, a consolidation) to a
+# detached background child. VS Code waits for the hook's stdout to reach EOF,
+# so the launcher must not let that child inherit a handle to the caller's
+# stdout or stderr pipe: Windows PowerShell 5.1 holds an extra inheritable
+# duplicate of its own stdout handle, and every process it starts inherits
+# every inheritable handle it holds (observed; docs/install-vscode.md). Margins
+# are wide on purpose: a 15 s background sleeper against a < 5 s return bound,
+# and a 3 s foreground sleep against a >= 3 s bound.
+_BG_SLEEP_S = 15
+_RETURN_BOUND_S = 5
+_FG_SLEEP_S = 3
+_BG_STDOUT = "stub stdout ünï – 日本"
+
+
+def _bg_stub(background: bool) -> str:
+    body = 'cat >/dev/null\nprintf "%s\\n" "' + _BG_STDOUT + '"\n'
+    if background:
+        body += (
+            '( echo started >> "$REMEMBER_TEST_MARKER"; sleep ' + str(_BG_SLEEP_S)
+            + '; echo finished >> "$REMEMBER_TEST_MARKER" ) </dev/null >/dev/null 2>&1 &\n'
+            "disown 2>/dev/null || true\n"
+        )
+    return body + "exit 4\n"
+
+
+def _timed(run):
+    started = time.monotonic()
+    result = run()
+    return result, time.monotonic() - started
+
+
+def _both_launcher_forms(root, script, env_extra):
+    """(label, result, seconds) for the launcher alone (`-File`) and for the
+    manifest form, each timed until the caller sees stdout and stderr close --
+    which is what VS Code waits for."""
+    env = _launcher_env(root, env_extra)
+    direct, direct_s = _timed(lambda: _run_launcher_file(root, script, env))
+    manifest, manifest_s = _timed(
+        lambda: _run_launcher(root, _PS_VALUE.format(name=script), env_extra))
+    return [("-File", direct, direct_s), ("manifest", manifest, manifest_s)]
+
+
+@_needs_win_launcher
+def test_launcher_does_not_wait_for_the_hooks_background_child(tmp_path):
+    """A hook that backgrounds a 15 s child and exits must hand control back as
+    soon as it exits, with its stdout and exit code intact -- and the child
+    must keep running (the save it stands for still happens). Observed on
+    Windows only; before the fix both forms took the full 15 s."""
+    markers = [tmp_path / "bg-file.txt", tmp_path / "bg-manifest.txt"]
+    root = _fake_plugin(tmp_path, {"bg.sh": _bg_stub(background=True)})
+    env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(markers[0]).replace("\\", "/")})
+    direct, direct_s = _timed(lambda: _run_launcher_file(root, "bg.sh", env))
+    manifest, manifest_s = _timed(lambda: _run_launcher(
+        root, _PS_VALUE.format(name="bg.sh"),
+        {"REMEMBER_TEST_MARKER": str(markers[1]).replace("\\", "/")}))
+    for label, result, took, marker in (("-File", direct, direct_s, markers[0]),
+                                        ("manifest", manifest, manifest_s, markers[1])):
+        assert took < _RETURN_BOUND_S, f"{label}: launcher held the caller for {took:.1f}s"
+        assert result.returncode == 4, f"{label}: {result.stderr!r}"
+        assert result.stdout.decode("utf-8").rstrip("\r\n") == _BG_STDOUT, f"{label}: {result.stdout!r}"
+    # The background child was started, and outlives the launcher.
+    deadline = time.monotonic() + _BG_SLEEP_S + 30
+    while time.monotonic() < deadline and not all(
+            m.is_file() and "finished" in m.read_text(encoding="utf-8") for m in markers):
+        time.sleep(0.2)
+    for marker in markers:
+        assert marker.read_text(encoding="utf-8").split() == ["started", "finished"], marker
+
+
+@_needs_win_launcher
+def test_launcher_returns_fast_without_a_background_child(tmp_path):
+    """Positive control for the bound above: the same stub with no background
+    child also returns under it in both forms, so the bound measures the
+    background child, not launcher start-up."""
+    root = _fake_plugin(tmp_path, {"fg.sh": _bg_stub(background=False)})
+    for label, result, took in _both_launcher_forms(root, "fg.sh", None):
+        assert took < _RETURN_BOUND_S, f"{label}: {took:.1f}s"
+        assert result.returncode == 4, f"{label}: {result.stderr!r}"
+        assert result.stdout.decode("utf-8").rstrip("\r\n") == _BG_STDOUT, f"{label}: {result.stdout!r}"
+
+
+@_needs_win_launcher
+def test_launcher_still_waits_for_the_foreground_process(tmp_path):
+    """Positive control for the "does not wait" case: a hook that sleeps in the
+    FOREGROUND keeps the launcher for at least that long, in both forms, and
+    its stdout still arrives -- the launcher returns when bash exits, not
+    sooner."""
+    stub = f'cat >/dev/null\nsleep {_FG_SLEEP_S}\nprintf "%s\\n" "{_BG_STDOUT}"\n'
+    root = _fake_plugin(tmp_path, {"slow.sh": stub})
+    for label, result, took in _both_launcher_forms(root, "slow.sh", None):
+        assert took >= _FG_SLEEP_S, f"{label}: returned after {took:.1f}s"
+        assert result.returncode == 0, f"{label}: {result.stderr!r}"
+        assert result.stdout.decode("utf-8").rstrip("\r\n") == _BG_STDOUT, f"{label}: {result.stdout!r}"
+
+
+@_needs_win_launcher
+def test_launcher_forwards_a_large_non_ascii_stdout_complete(tmp_path):
+    """SessionStart's recap is UTF-8 and can be large: >= 64 KB (past any pipe
+    buffer) of non-ASCII output comes through byte-for-byte in both forms."""
+    line = "recap line ünï – 日本 ✓ {:06d}\n"
+    expected = "".join(line.format(i) for i in range(4000)).encode("utf-8")
+    assert len(expected) >= 64 * 1024
+    big = tmp_path / "big.txt"
+    big.write_bytes(expected)
+    root = _fake_plugin(tmp_path, {"big.sh": 'cat >/dev/null\ncat "$REMEMBER_TEST_BIG"\n'})
+    for label, result, _took in _both_launcher_forms(
+            root, "big.sh", {"REMEMBER_TEST_BIG": str(big).replace("\\", "/")}):
+        assert result.returncode == 0, f"{label}: {result.stderr!r}"
+        assert result.stdout == expected, (
+            f"{label}: {len(result.stdout)} bytes vs {len(expected)} expected")
+
+
+@_needs_win_launcher
+def test_launcher_runs_the_hook_when_the_handle_step_fails(tmp_path):
+    """The handle step is best effort: when it throws (here a type already
+    loaded under its name, without its method), the hook still runs and its
+    exit code is forwarded -- it is not swallowed by the launcher's own
+    exit-0 catch. Observed on Windows only."""
+    marker = tmp_path / "ran.txt"
+    root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub() + "exit 4\n"})
+    result = _run_launcher(
+        root,
+        "Add-Type -TypeDefinition 'namespace ClaudeRemember { public static class Handles { } }'; "
+        r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh; exit $LASTEXITCODE',
+        {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")})
+    assert marker.is_file(), result.stderr
+    assert result.returncode == 4, result.stderr
 
 
 def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):
