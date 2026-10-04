@@ -208,7 +208,7 @@ ANTIGRAVITY = Host(
 # also appears in the capture but is not a Claude Code signature variable (those
 # are CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_SESSION_ID), so detection ignores it.
 # The standalone Copilot CLI's hooks carry the same COPILOT_CLI and
-# COPILOT_PLUGIN_ROOT (observed 2026-10-03; docs/install-vscode.md).
+# COPILOT_PLUGIN_ROOT (observed 2026-10-03; docs/vscode-verification.md).
 COPILOT = Host(
     name="copilot",
     plugin_root_vars=("CLAUDE_PLUGIN_ROOT",),

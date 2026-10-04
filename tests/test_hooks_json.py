@@ -451,7 +451,7 @@ def _script_named_by(command: str) -> str:
 # and a launcher run without its mandatory script name errors instead of
 # prompting on stdin. NOT a fix for an unset or stale root: there `-File`
 # fails before any script runs, and Windows PowerShell 5.1 prints its banner
-# to stdout even with -NoLogo (observed) -- see docs/install-vscode.md.
+# to stdout even with -NoLogo (observed) -- see docs/vscode-verification.md.
 _PS_VALUE = ('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '
              '"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}; exit $LASTEXITCODE')
 
@@ -717,7 +717,7 @@ def test_launcher_error_line_keeps_non_ascii_paths_as_utf8(tmp_path, manifest):
 # child inherit a handle to the caller's stdout or stderr pipe: Windows
 # PowerShell 5.1 holds an extra inheritable duplicate of its own stdout handle,
 # and every process it starts inherits every inheritable handle it holds
-# (observed; docs/install-vscode.md). Margins are wide on purpose: a broken
+# (observed; docs/vscode-verification.md). Margins are wide on purpose: a broken
 # launcher is held for the whole 15 s background sleep, so the return bound sits
 # 5 s below it (10 s) rather than near launcher start-up; and a 3 s foreground
 # sleep is checked against a >= 3 s bound.
