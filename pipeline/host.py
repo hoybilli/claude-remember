@@ -475,6 +475,9 @@ def antigravity_step_is_unmapped(obj: dict) -> bool:
     return isinstance(step_type, str) and step_type not in _ANTIGRAVITY_STEP_ROLES
 
 
+_COPILOT_ARGS_DECODE_MAX = 65536
+
+
 def _format_copilot_tool_request(req: dict) -> str:
     """``[TOOL: name detail]`` for one Copilot ``toolRequests`` entry, in the
     same shape ``pipeline.extract._format_tool_use`` gives Claude Code's
@@ -483,12 +486,24 @@ def _format_copilot_tool_request(req: dict) -> str:
     ``arguments`` is a dict on a live session but has also been observed as a
     JSON *string* in tool telemetry -- both are accepted; anything else is
     treated as no arguments.
+
+    The string form is model-controlled and decoded a second time here, so it
+    must never raise: one line that did would stop ``extract_messages`` at it
+    on every later save of the session. A string over
+    ``_COPILOT_ARGS_DECODE_MAX`` is not decoded at all, and one nested too
+    deep for the decoder (``RecursionError``) is not either; both render as
+    the raw string, truncated.
     """
     name = req.get("name") or "?"
     args = req.get("arguments")
     if isinstance(args, str):
+        raw = args
+        if len(raw) > _COPILOT_ARGS_DECODE_MAX:
+            return f"[TOOL: {name} `{raw[:80]}`]"
         try:
-            args = json.loads(args)
+            args = json.loads(raw)
+        except RecursionError:
+            return f"[TOOL: {name} `{raw[:80]}`]"
         except ValueError:
             args = {}
     if not isinstance(args, dict):
@@ -598,7 +613,7 @@ def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
 
 
 _COPILOT_UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
 
@@ -627,7 +642,7 @@ def copilot_transcript_for(session_id: str, env: Mapping[str, str] | None = None
     (``agent-host-copilotcli:/<uuid>``) is normalised on the shell side and
     is rejected here so the two layers cannot disagree silently.
     """
-    if not session_id or not _COPILOT_UUID_RE.match(session_id):
+    if not session_id or not _COPILOT_UUID_RE.fullmatch(session_id):
         return None
     path = os.path.normpath(
         os.path.join(copilot_session_state_dir(env), session_id, "events.jsonl")

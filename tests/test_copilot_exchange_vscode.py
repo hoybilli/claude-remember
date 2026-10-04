@@ -100,6 +100,55 @@ def test_tool_request_formatting_matches_claude_style():
     assert fmt({"arguments": {}}) == "[TOOL: ?]"
 
 
+def test_oversized_string_arguments_render_bounded_without_decoding():
+    """200,000 `[` (model-controlled, double-encoded): not decoded, rendered
+    as a bounded `[TOOL: ...]` line instead of raising."""
+    line = _host._format_copilot_tool_request({"name": "edit", "arguments": "[" * 200_000})
+    assert line.startswith("[TOOL: edit ")
+    assert len(line) < 200
+
+
+def test_deeply_nested_string_arguments_under_the_size_cap_do_not_raise():
+    """Under the size cap but past the decoder's recursion limit: the
+    RecursionError is caught and the raw string rendered, truncated."""
+    deep = "[" * 60_000
+    assert len(deep) <= _host._COPILOT_ARGS_DECODE_MAX
+    line = _host._format_copilot_tool_request({"name": "edit", "arguments": deep})
+    assert line.startswith("[TOOL: edit ")
+    assert len(line) < 200
+
+
+def test_a_poison_tool_line_does_not_stop_extraction(tmp_path):
+    """One such line among real exchanges: extract_messages still returns the
+    exchanges on both sides of it."""
+    lines = [
+        {"type": "session.start", "data": {}},
+        {"type": "user.message", "data": {"content": "first question"}},
+        {"type": "assistant.message",
+         "data": {"content": "", "toolRequests": [{"name": "t", "arguments": "[" * 200_000}]}},
+        {"type": "assistant.message", "data": {"content": "first answer"}},
+        {"type": "user.message", "data": {"content": "second question"}},
+    ]
+    path = tmp_path / "events.jsonl"
+    path.write_text("".join(json.dumps(o) + "\n" for o in lines), encoding="utf-8")
+    msgs = extract_messages(str(path), envelope="copilot")
+    texts = [t for _r, t in msgs]
+    assert any("first question" in t for t in texts)
+    assert any("first answer" in t for t in texts)
+    assert any("second question" in t for t in texts)
+
+
+def test_copilot_transcript_lookup_rejects_a_trailing_newline(tmp_path, monkeypatch):
+    """fullmatch, not match-with-$: `<uuid>\\n` is not a uuid. Every file is
+    made to "exist" so only the id check can refuse (a directory whose name
+    ends in a newline cannot be created on Windows filesystems)."""
+    uuid = "11111111-2222-4333-8444-555555555555"
+    monkeypatch.setattr(os.path, "isfile", lambda _p: True)
+    env = {"COPILOT_HOME": str(tmp_path)}
+    assert _host.copilot_transcript_for(uuid, env) is not None   # positive control
+    assert _host.copilot_transcript_for(uuid + "\n", env) is None
+
+
 def test_extract_messages_dispatches_copilot_envelope():
     msgs = extract_messages(VSCODE_EVENTS, envelope="copilot")
     roles = [r for r, _ in msgs]
