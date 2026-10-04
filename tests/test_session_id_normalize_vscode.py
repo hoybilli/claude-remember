@@ -43,97 +43,84 @@ _HOST_ENV = tuple(dict.fromkeys(
      "REMEMBER_SESSION_ID_NORMALIZED", "REMEMBER_SESSION_ID_HINT")
     + _EARLIER_SIGNATURES + _host.COPILOT.signature_vars))
 
-# Two entry points share one rule: the print helpers (run inside $(...)) and
-# the no-fork `remember_session_id_resolve`, which sets two globals in the
-# caller's shell (issue: vscode, #511). Every case below runs against both.
-_CALLS = {
-    "print": 'id=$(remember_normalize_session_id "$1"); '
-             'REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$1")',
-    "resolve": 'remember_session_id_resolve "$1"; id=$REMEMBER_SESSION_ID_NORMALIZED; '
-               'REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT',
-}
-
-
-@pytest.fixture(params=sorted(_CALLS))
-def mode(request):
-    return request.param
-
-
-def _run_mode(mode: str, raw: str, extra_env: dict | None = None) -> tuple[str, str]:
-    script = (
-        f'. "{LIB.as_posix()}"\n'
-        f'{_CALLS[mode]}\n'
-        f'{VALIDATE}\n'
-        'printf "%s|%s" "$id" "${REMEMBER_HOST_HINT:-}"\n'
-    )
+def _bash(body: str, *args: str, extra_env: dict | None = None) -> str:
+    """Source the library, run `body` with `args` as $1.., return stdout. The
+    inherited host signals are stripped; only `extra_env` puts any back."""
     env = {k: v for k, v in os.environ.items() if k not in _HOST_ENV}
     env.update(extra_env or {})
-    r = subprocess.run([BASH, "-c", script, "bash", raw], capture_output=True, env=env, timeout=30)
-    out = decode_bash_output(r.stdout)
+    r = subprocess.run([BASH, "-c", f'. "{LIB.as_posix()}"\n{body}', "bash", *args],
+                       capture_output=True, env=env, timeout=30)
     assert r.returncode == 0, decode_bash_output(r.stderr)
+    return decode_bash_output(r.stdout)
+
+
+def run(raw: str, extra_env: dict | None = None) -> tuple[str, str]:
+    """`remember_session_id_resolve` as a hook calls it, then the hooks' own
+    validator: returns (id, hint)."""
+    out = _bash(
+        'remember_session_id_resolve "$1"; id=$REMEMBER_SESSION_ID_NORMALIZED; '
+        'REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT\n'
+        f'{VALIDATE}\n'
+        'printf "%s|%s" "$id" "${REMEMBER_HOST_HINT:-}"\n',
+        raw, extra_env=extra_env)
     return tuple(out.split("|", 1))
 
 
-@pytest.fixture
-def run(mode):
-    return lambda raw, extra_env=None: _run_mode(mode, raw, extra_env)
-
-
-def test_vscode_prefix_is_stripped_and_hint_set(run):
+def test_vscode_prefix_is_stripped_and_hint_set():
     assert run(f"agent-host-copilotcli:/{UUID}") == (UUID, "copilot")
 
 
-def test_plain_uuid_is_unchanged_and_no_hint(run):
+def test_plain_uuid_is_unchanged_and_no_hint():
     """Positive control: Claude Code ids pass through untouched."""
     assert run(UUID) == (UUID, "")
 
 
-def test_traversal_after_prefix_is_rejected_downstream(run):
+def test_traversal_after_prefix_is_rejected_downstream():
     """Review focus 3: normalisation must not launder a hostile tail."""
     assert run("agent-host-copilotcli:/../x")[0] == ""
     assert run("agent-host-copilotcli:/")[0] == ""
 
 
-def test_other_colon_forms_are_left_for_the_validator(run):
+def test_other_colon_forms_are_left_for_the_validator():
     """A colon without the `:/` prefix shape is not ours to rewrite."""
     assert run("abc:def")[0] == ""
 
 
-def test_bare_uuid_with_copilot_cli_env_is_copilot(run):
+def test_bare_uuid_with_copilot_cli_env_is_copilot():
     assert run(UUID, {"COPILOT_CLI": "1"}) == (UUID, "copilot")
 
 
-def test_bare_uuid_with_copilot_plugin_root_only_is_copilot(run):
+def test_bare_uuid_with_copilot_plugin_root_only_is_copilot():
     assert run(UUID, {"COPILOT_PLUGIN_ROOT": "/x"}) == (UUID, "copilot")
 
 
-def test_claude_code_entrypoint_beats_copilot_env(run):
+def test_claude_code_entrypoint_beats_copilot_env():
     """Mirrors pipeline.host.detect_host: Claude Code's signature wins."""
     assert run(UUID, {"COPILOT_CLI": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}) == (UUID, "")
 
 
-def test_claude_code_session_id_beats_copilot_env(run):
+def test_claude_code_session_id_beats_copilot_env():
     assert run(UUID, {"COPILOT_CLI": "1", "CLAUDE_CODE_SESSION_ID": "abc"}) == (UUID, "")
 
 
-def test_codex_thread_id_beats_copilot_env(run):
+def test_codex_thread_id_beats_copilot_env():
     """A Codex session whose env also carries COPILOT_CLI keeps its plain recap,
     as pipeline.host.detect_host says codex (CODEX precedes COPILOT)."""
     assert run(UUID, {"COPILOT_CLI": "1", "CODEX_THREAD_ID": "t-1"}) == (UUID, "")
 
 
-def test_codex_session_id_beats_copilot_env(run):
+def test_codex_session_id_beats_copilot_env():
     assert run(UUID, {"COPILOT_CLI": "1", "CODEX_SESSION_ID": "s-1"}) == (UUID, "")
 
 
-def test_antigravity_conversation_id_beats_copilot_env(run):
+def test_antigravity_conversation_id_beats_copilot_env():
     assert run(UUID, {"COPILOT_PLUGIN_ROOT": "/x",
                       "ANTIGRAVITY_CONVERSATION_ID": "c-1"}) == (UUID, "")
 
 
 @pytest.mark.parametrize("earlier_var", _EARLIER_SIGNATURES)
 @pytest.mark.parametrize("copilot_var", _host.COPILOT.signature_vars)
-def test_hint_agrees_with_detect_host_for_every_earlier_signature(run, earlier_var, copilot_var):
+def test_hint_agrees_with_detect_host_for_every_earlier_signature(earlier_var, copilot_var):
     """Registry-derived parity: whatever detect_host says for this env, the
     shell hint says copilot exactly when detect_host says COPILOT."""
     env = {copilot_var: "1", earlier_var: "x"}
@@ -144,12 +131,12 @@ def test_hint_agrees_with_detect_host_for_every_earlier_signature(run, earlier_v
     assert run(UUID, {copilot_var: "1"}) == (UUID, "copilot")
 
 
-def test_copilot_home_alone_is_not_a_signature(run):
+def test_copilot_home_alone_is_not_a_signature():
     """A configuration path a user may set anywhere (#463)."""
     assert run(UUID, {"COPILOT_HOME": "/h/.copilot"}) == (UUID, "")
 
 
-def test_prefixed_id_in_clean_env_is_copilot(run):
+def test_prefixed_id_in_clean_env_is_copilot():
     """Positive control for the negatives above: the id route needs no env."""
     assert run(f"agent-host-copilotcli:/{UUID}") == (UUID, "copilot")
 
@@ -157,18 +144,11 @@ def test_prefixed_id_in_clean_env_is_copilot(run):
 # ── The no-fork entry point itself (issue: vscode, #511) ──────────────────
 
 def _resolve_twice(first: str, second: str, extra_env: dict | None = None) -> str:
-    script = (
-        f'. "{LIB.as_posix()}"\n'
+    return _bash(
         'remember_session_id_resolve "$1"\n'
         'remember_session_id_resolve "$2"\n'
-        'printf "%s|%s" "$REMEMBER_SESSION_ID_NORMALIZED" "$REMEMBER_SESSION_ID_HINT"\n'
-    )
-    env = {k: v for k, v in os.environ.items() if k not in _HOST_ENV}
-    env.update(extra_env or {})
-    r = subprocess.run([BASH, "-c", script, "bash", first, second],
-                       capture_output=True, env=env, timeout=30)
-    assert r.returncode == 0, decode_bash_output(r.stderr)
-    return decode_bash_output(r.stdout)
+        'printf "%s|%s" "$REMEMBER_SESSION_ID_NORMALIZED" "$REMEMBER_SESSION_ID_HINT"\n',
+        first, second, extra_env=extra_env)
 
 
 def test_resolve_overwrites_both_globals_on_every_call():

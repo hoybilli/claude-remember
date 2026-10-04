@@ -712,19 +712,14 @@ fi
 # failure here (no jq above, so no id; the library missing) leaves the variable
 # empty, which is exactly the pre-existing behaviour -- never an abort.
 _COPILOT_LAST_SAVE_TRANSCRIPT=""
-if [ -n "${_LS_SESSION:-}" ]; then
-    if ! command -v remember_copilot_transcript_for >/dev/null 2>&1; then
-        source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null || true
-    fi
-    if command -v remember_copilot_transcript_for >/dev/null 2>&1; then
-        # Prints nothing when the file is absent or the id is refused (its own
-        # allowlist rejects '/', '\', ':', '.' and '..'); the scrub is the same
-        # #727 guard the .session read above applies to the value printed on
-        # the line below, which commands/doctor.md relays verbatim. (Other env
-        # paths, the Paths section's session-state line included, print unscrubbed,
-        # as elsewhere in this file.)
-        _COPILOT_LAST_SAVE_TRANSCRIPT=$(remember_copilot_transcript_for "$_LS_SESSION" 2>/dev/null | tr -d '[:cntrl:]')
-    fi
+if [ -n "${_LS_SESSION:-}" ] && source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null; then
+    # Prints nothing when the file is absent or the id is refused (its own
+    # allowlist rejects '/', '\', ':', '.' and '..'); the scrub is the same
+    # #727 guard the .session read above applies to the value printed on
+    # the line below, which commands/doctor.md relays verbatim. (Other env
+    # paths, the Paths section's session-state line included, print unscrubbed,
+    # as elsewhere in this file.)
+    _COPILOT_LAST_SAVE_TRANSCRIPT=$(remember_copilot_transcript_for "$_LS_SESSION" 2>/dev/null | tr -d '[:cntrl:]')
 fi
 if [ -n "$_COPILOT_LAST_SAVE_TRANSCRIPT" ]; then
     echo "OK   last save came from a VS Code Agents / Copilot session ($_COPILOT_LAST_SAVE_TRANSCRIPT); Claude Code's transcript dir is not expected (issue: vscode)"

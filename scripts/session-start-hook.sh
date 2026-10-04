@@ -290,14 +290,13 @@ _stdin_session_id() {
     _stdin_json_string session_id "$1"
 }
 
-_RAW_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
+CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
 # issue: vscode -- VS Code Agents prefixes the uuid (`agent-host-copilotcli:/`);
 # strip it before the allowlist below, which correctly rejects `:` and `/`.
 # The resolver sets globals instead of forking two $(...) (#511).
-remember_session_id_resolve "$_RAW_SESSION_ID"
+remember_session_id_resolve "$CURRENT_SESSION_ID"
 CURRENT_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
 REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
-unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename. This is compared against
 # names taken off the transcript directory, and `..` would match nothing
 # useful while `/` would match across directories, so it faces the same guard

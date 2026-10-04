@@ -401,11 +401,10 @@ fi
 # fallback), and _stdin_json_string already defined there. session_id is
 # extracted from that same capture rather than reading stdin a second time —
 # it is a single stream and a second read here would see EOF.
-_RAW_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || _RAW_SESSION_ID=""
-remember_session_id_resolve "$_RAW_SESSION_ID"   # issue: vscode -- no fork (#511)
+STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+remember_session_id_resolve "$STDIN_SESSION_ID"   # issue: vscode -- no fork (#511)
 STDIN_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
 REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
-unset _RAW_SESSION_ID
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id now faces too (#620) -- both are
@@ -508,15 +507,15 @@ NOTICE_TTL=3600
 COPILOT_TRANSCRIPT=""
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
-elif [ -n "$STDIN_SESSION_ID" ] && remember_copilot_transcript_into "$STDIN_SESSION_ID"; then
+elif remember_copilot_transcript_into "$STDIN_SESSION_ID"; then
     # issue: vscode -- VS Code Agents / Copilot keeps its transcript under
     # ~/.copilot/session-state/<uuid>/, never under Claude Code's projects dir.
-    # The `_into` form sets a global instead of forking a $(...) (#511).
+    # The `_into` form sets a global instead of forking a $(...) (#511), and
+    # refuses an empty id itself.
     COPILOT_TRANSCRIPT="$REMEMBER_COPILOT_TRANSCRIPT"
     LATEST_JSONL="$COPILOT_TRANSCRIPT"
-    declare -F log >/dev/null 2>&1 && log "hook" "post-tool: copilot transcript $COPILOT_TRANSCRIPT"
+    log "hook" "post-tool: copilot transcript $COPILOT_TRANSCRIPT"
 else
-    COPILOT_TRANSCRIPT=""
     LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
 fi
 if [ -z "$LATEST_JSONL" ]; then

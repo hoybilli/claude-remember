@@ -207,8 +207,8 @@ ANTIGRAVITY = Host(
 # a Claude Code session that merely has it set. CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP
 # also appears in the capture but is not a Claude Code signature variable (those
 # are CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_SESSION_ID), so detection ignores it.
-# That the standalone Copilot CLI runs the same harness, and so looks the same,
-# is reasoned from the COPILOT_CLI name, not observed.
+# The standalone Copilot CLI's hooks carry the same COPILOT_CLI and
+# COPILOT_PLUGIN_ROOT (observed 2026-10-03; docs/install-vscode.md).
 COPILOT = Host(
     name="copilot",
     plugin_root_vars=("CLAUDE_PLUGIN_ROOT",),

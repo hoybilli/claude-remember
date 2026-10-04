@@ -18,25 +18,18 @@
 # Only the `agent-host-<tag>:/<rest>` shape is rewritten. Anything else is
 # passed through unchanged and left for the validator to judge.
 #
-# Two entry points, one rule. The hooks call the no-fork form,
-# remember_session_id_resolve, which sets REMEMBER_SESSION_ID_NORMALIZED and
-# REMEMBER_SESSION_ID_HINT in the caller's own shell: post-tool-hook.sh runs on
-# every tool call, and each $(...) is a fork that docs/windows.md (#511)
-# measured as slow on Git Bash. The print forms (remember_normalize_session_id,
-# remember_session_id_host_hint) are kept for callers that want a value inside
-# $(...); they are implemented on top of the resolver, so they set the same two
-# globals as a side effect -- harmless inside $(...), where the subshell
-# discards them. Each hook sets and exports REMEMBER_HOST_HINT itself. The hint
-# is a logging/dispatch hint only -- never a path input.
+# remember_session_id_resolve sets REMEMBER_SESSION_ID_NORMALIZED and
+# REMEMBER_SESSION_ID_HINT in the caller's own shell instead of printing them:
+# post-tool-hook.sh runs on every tool call, and each $(...) is a fork that
+# docs/windows.md (#511) measured as slow on Git Bash. Each hook sets and
+# exports REMEMBER_HOST_HINT itself. The hint is a logging/dispatch hint only
+# -- never a path input.
 #
 # USAGE
 #   source "$_HOOK_DIR/lib-session-id.sh"
 #   remember_session_id_resolve "$raw"
 #   id=$REMEMBER_SESSION_ID_NORMALIZED
 #   REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
-# or, where a fork does not matter:
-#   id=$(remember_normalize_session_id "$raw")
-#   REMEMBER_HOST_HINT=$(remember_session_id_host_hint "$raw"); export REMEMBER_HOST_HINT
 #
 # Bash 3.2 safe: parameter expansion and `case` only, no regex, no arrays,
 # no printf -v.
@@ -73,19 +66,6 @@ remember_session_id_resolve() {
         && { [ -n "${COPILOT_CLI:-}" ] || [ -n "${COPILOT_PLUGIN_ROOT:-}" ]; }; then
         REMEMBER_SESSION_ID_HINT=copilot
     fi
-    return 0
-}
-
-# remember_normalize_session_id RAW -> prints the id to use
-remember_normalize_session_id() {
-    remember_session_id_resolve "$1"
-    printf '%s' "$REMEMBER_SESSION_ID_NORMALIZED"
-}
-
-# remember_session_id_host_hint RAW -> prints "copilot" or ""
-remember_session_id_host_hint() {
-    remember_session_id_resolve "$1"
-    printf '%s' "$REMEMBER_SESSION_ID_HINT"
     return 0
 }
 
