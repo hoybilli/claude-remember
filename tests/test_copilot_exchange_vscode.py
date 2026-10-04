@@ -16,7 +16,7 @@ VSCODE_EVENTS = os.path.join(FIXTURES, "vscode-events.jsonl")
 
 def _by_type(t):
     with open(VSCODE_EVENTS, encoding="utf-8") as f:
-        return [json.loads(l) for l in f if json.loads(l).get("type") == t]
+        return [o for o in map(json.loads, f) if o.get("type") == t]
 
 
 def test_user_message_is_human_and_uses_content_not_transformed():

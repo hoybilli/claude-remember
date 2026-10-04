@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline import host as _host
 
+from .test_codex_signature_463 import _load_env
+
 FIXTURES = Path(__file__).parent / "fixtures"
 ENV = FIXTURES / "vscode-env-vscode.txt"
 STDIN = FIXTURES / "vscode-hook-stdin-vscode.json"
@@ -19,19 +21,8 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 _EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd")
 
 
-def _parse_env(path):
-    out = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("#"):
-            continue
-        if "=" in line:
-            k, v = line.split("=", 1)
-            out[k] = v
-    return out
-
-
 def _env():
-    return _parse_env(ENV)
+    return _load_env(ENV)
 
 
 def test_copilot_host_is_in_registry_with_plugin_root():
@@ -68,12 +59,9 @@ def test_claude_and_codex_fixtures_unchanged():
     design (#463). The inherited CLAUDE_CODE_* names are stripped so the test
     asks the Codex question on its own.
     """
-    # The Codex capture is a nested session (it inherits CLAUDE_CODE_* from a
-    # parent Claude Code, see its header), where CLAUDE_CODE wins by design;
-    # strip the inherited names to ask the Codex question on its own.
     codex = {
         k: v
-        for k, v in _parse_env(FIXTURES / "codex-env-463.txt").items()
+        for k, v in _load_env(FIXTURES / "codex-env-463.txt").items()
         if not k.startswith("CLAUDE_CODE_")
     }
     assert _host.detect_host(codex) is _host.CODEX

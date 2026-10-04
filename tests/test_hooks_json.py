@@ -547,25 +547,33 @@ def _launcher_env(root: Path | None, env_extra=None, path_first_system32=True,
     return env
 
 
+def _ps_argv(args, policy="Bypass"):
+    """Windows PowerShell with the flags every launcher run here uses."""
+    return [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", policy, *args]
+
+
+def _launcher_args(root: Path, script: str, manifest: bool):
+    """The manifest's full `powershell` value (`-Command`), or the launcher
+    alone via `-File` (what the manifest's child shell runs)."""
+    if manifest:
+        return ["-Command", _PS_VALUE.format(name=script)]
+    return ["-File", str(root / "scripts" / "run-hook.ps1"), script]
+
+
+def _powershell(args, env, payload: bytes = _PAYLOAD.encode("utf-8"), policy="Bypass"):
+    return subprocess.run(_ps_argv(args, policy), input=payload, capture_output=True,
+                          env=env, timeout=120)
+
+
 def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32=True,
                   policy="Bypass"):
-    return subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", policy,
-         "-Command", ps_value],
-        input=_PAYLOAD.encode("utf-8"),
-        capture_output=True,
-        env=_launcher_env(root, env_extra, path_first_system32),
-        timeout=120,
-    )
+    return _powershell(["-Command", ps_value],
+                       _launcher_env(root, env_extra, path_first_system32), policy=policy)
 
 
 def _run_launcher_file(root: Path, script: str, env):
     """The launcher alone, via `-File` (what the manifest's child shell runs)."""
-    return subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", str(root / "scripts" / "run-hook.ps1"), script],
-        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120,
-    )
+    return _powershell(_launcher_args(root, script, manifest=False), env)
 
 
 @_needs_win_launcher
@@ -837,11 +845,7 @@ def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):
         f"$env:LOCALAPPDATA = '{empty}'; "
         f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
     )
-    return subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-Command", command],
-        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120,
-    )
+    return _powershell(["-Command", command], env)
 
 
 @_needs_win_launcher
@@ -890,10 +894,7 @@ def test_program_w6432_is_a_git_bash_base(tmp_path):
         f"$env:LOCALAPPDATA = '{empty}'; "
         f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
     )
-    result = subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-Command", command],
-        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120)
+    result = _powershell(["-Command", command], env)
     assert result.returncode == 0, result.stderr
     assert marker.is_file(), result.stderr
     assert b"Git Bash not found" not in result.stderr
@@ -925,13 +926,7 @@ _STDIN_SEEN_STUB = 'cat > "$REMEMBER_TEST_OUT"\nexit 5\n'
 
 
 def _launcher_with_input(root, script, payload: bytes, env, manifest: bool):
-    if manifest:
-        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-Command", _PS_VALUE.format(name=script)]
-    else:
-        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", str(root / "scripts" / "run-hook.ps1"), script]
-    return subprocess.run(argv, input=payload, capture_output=True, env=env, timeout=120)
+    return _powershell(_launcher_args(root, script, manifest), env, payload)
 
 
 @_needs_win_launcher
@@ -979,14 +974,9 @@ def _held_open(root, script, payload: bytes, env, manifest: bool, close: bool):
     """Write the payload and either close stdin or keep it open for
     _HELD_OPEN_S; return (seconds until the launcher exited or the hold
     ended, stdout, rc -- None when the launcher was still running)."""
-    if manifest:
-        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-Command", _PS_VALUE.format(name=script)]
-    else:
-        argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", str(root / "scripts" / "run-hook.ps1"), script]
     started = time.monotonic()
-    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(_ps_argv(_launcher_args(root, script, manifest)),
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
     try:
         proc.stdin.write(payload)
@@ -1049,10 +1039,7 @@ def _run_launcher_in_language_mode(root, mode, marker):
     pre = f"$ExecutionContext.SessionState.LanguageMode = '{mode}'; " if mode else ""
     command = pre + f"& '{launcher}' probe.sh; exit $LASTEXITCODE"
     env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")})
-    return subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-Command", command],
-        input=_PAYLOAD.encode("utf-8"), capture_output=True, env=env, timeout=120)
+    return _powershell(["-Command", command], env)
 
 
 def _clm_stub():
@@ -1101,10 +1088,6 @@ def test_launcher_error_under_constrained_language_mode_still_exits_zero(tmp_pat
     launcher = root / "scripts" / "run-hook.ps1"
     command = ("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; "
                f"& '{launcher}' probe.sh; exit $LASTEXITCODE")
-    result = subprocess.run(
-        [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-Command", command],
-        input=_PAYLOAD.encode("utf-8"), capture_output=True,
-        env=_launcher_env(root, {"REMEMBER_BASH": str(bogus)}), timeout=120)
+    result = _powershell(["-Command", command], _launcher_env(root, {"REMEMBER_BASH": str(bogus)}))
     assert result.returncode == 0, result.stderr
     assert b"claude-remember: launcher error" in result.stderr, result.stderr
