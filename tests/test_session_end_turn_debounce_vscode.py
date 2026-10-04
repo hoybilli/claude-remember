@@ -331,21 +331,45 @@ CLAMPED = "session-end: cooldowns.turn_end_debounce_seconds=999999 clamped to 36
 
 # Stops the sleeping subshell (and its `sleep` child) the clamp case leaves
 # behind, so no hour-long process outlives the test. `ps -ef` prints PID and
-# PPID as its second and third columns on Linux, macOS and Git Bash alike
-# (Git Bash's `ps` has no -o).
-_STOP_SLEEPER = r'''p=$1
-kids=$(ps -ef 2>/dev/null | awk -v p="$p" '$3==p {print $2}')
-kill $kids "$p" 2>/dev/null
+# PPID as its second and third columns, and the command with its arguments
+# last, on Linux, macOS and Git Bash alike (Git Bash's `ps` has no -o).
+# $1 is the pid from tmp/save-session.pid (may be empty); $2 is the path of
+# this sandbox's hook copy. The second pass is the belt for a pid file that
+# never showed up: any `sleep 3600` whose parent shell is running this
+# sandbox's hook is the clamp case's sleeper.
+_STOP_SLEEPER = r'''p=$1 hook=$2
+if [ -n "$p" ]; then
+    kids=$(ps -ef 2>/dev/null | awk -v p="$p" '$3==p {print $2}')
+    kill $kids "$p" 2>/dev/null
+fi
+ps -ef 2>/dev/null | awk '$NF=="3600" && $(NF-1) ~ /(^|\/)sleep$/ {print $2, $3}' |
+while read -r kid parent; do
+    case "$(ps -ef 2>/dev/null | awk -v p="$parent" '$2==p')" in
+        *"$hook"*) kill "$kid" "$parent" 2>/dev/null ;;
+    esac
+done
 exit 0
 '''
+# The hook writes tmp/save-session.pid only after it has forked the sleeper,
+# which is after the deferral line the test waits on: poll for it.
+_PID_FILE_WAIT_S = 10
 
 
 def _stop_sleeper(sb: Sandbox) -> None:
     pid_file = sb.remember / "tmp" / "save-session.pid"
-    pid = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
-    if pid.isdigit():
-        subprocess.run([BASH, "-c", _STOP_SLEEPER, "stop", pid],
-                       capture_output=True, timeout=30, check=False)
+    pid = ""
+    deadline = time.monotonic() + _PID_FILE_WAIT_S
+    while time.monotonic() < deadline:
+        try:
+            pid = pid_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            pid = ""
+        if pid.isdigit():
+            break
+        time.sleep(0.1)
+    hook = _posix(sb.plugin / "scripts" / "session-end-hook.sh")
+    subprocess.run([BASH, "-c", _STOP_SLEEPER, "stop", pid if pid.isdigit() else "", hook],
+                   capture_output=True, timeout=30, check=False)
 
 
 def test_debounce_above_an_hour_is_clamped_to_an_hour(tmp_path):

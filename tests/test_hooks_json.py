@@ -965,12 +965,20 @@ def test_launcher_hands_bash_a_large_stdin_complete(tmp_path, manifest):
 
 
 _READ_T1_STUB = 'IFS= read -r -t 1 line\nprintf "got:%s\\n" "$line"\nexit 0\n'
-_HELD_OPEN_BOUND_S = 10
+# Same shape as the detach tests above. The held-open case keeps stdin open
+# for _HELD_OPEN_S, so a launcher that waited for EOF is held that whole time
+# and then killed (rc None): the launcher exiting at all is the proof that it
+# did not wait. The return bound sits 10 s below the hold -- a hang detector,
+# not a start-up measurement: a run chains two cold Windows PowerShell 5.1
+# starts, a first Add-Type compile and the stub's 1 s read.
+_HELD_OPEN_S = 30
+_HELD_OPEN_BOUND_S = _HELD_OPEN_S - 10
 
 
 def _held_open(root, script, payload: bytes, env, manifest: bool, close: bool):
-    """Write the payload and either close stdin or keep it open; return
-    (seconds until the launcher exited or the bound passed, stdout, rc)."""
+    """Write the payload and either close stdin or keep it open for
+    _HELD_OPEN_S; return (seconds until the launcher exited or the hold
+    ended, stdout, rc -- None when the launcher was still running)."""
     if manifest:
         argv = [_WIN_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                 "-Command", _PS_VALUE.format(name=script)]
@@ -985,7 +993,7 @@ def _held_open(root, script, payload: bytes, env, manifest: bool, close: bool):
         proc.stdin.flush()
         if close:
             proc.stdin.close()
-        deadline = started + _HELD_OPEN_BOUND_S + 20
+        deadline = started + _HELD_OPEN_S
         while proc.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         took = time.monotonic() - started

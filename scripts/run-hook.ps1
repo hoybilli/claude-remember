@@ -4,9 +4,12 @@
 # Git Bash explicitly, hands it this process's own stdin (the hook payload
 # JSON) and stdout, and returns bash's exit code.
 #
-# Every failure of the launcher itself exits 0, like every hook path: a hook
-# that cannot run does nothing rather than failing the session. Only bash's own
-# status is forwarded, and the hook scripts exit 0.
+# Once the launcher is running, every failure of its own exits 0, like every
+# hook path: a hook that cannot run does nothing rather than failing the
+# session. Only bash's own status is forwarded, and the hook scripts exit 0.
+# The one exception is before any of this runs: under -NonInteractive a call
+# without the script name fails parameter binding with exit 1 (the manifest
+# always passes the name).
 param(
     [Parameter(Mandatory = $true)][string]$Script,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
@@ -65,18 +68,12 @@ try {
 
     if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
         # Constrained Language Mode (AppLocker / WDAC script enforcement):
-        # the console-encoding setters and Add-Type below are refused, so the
-        # background work cannot be detached and the host waits for it. The
-        # hook itself still runs.
+        # Add-Type below is refused, so the background work cannot be
+        # detached and the host waits for it. The hook itself still runs.
         Write-LauncherMessage 'claude-remember: launcher: Constrained Language Mode; could not detach background work, the host will wait for it'
         & $bash $target @Rest
         exit $LASTEXITCODE
     }
-
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [Console]::InputEncoding = $utf8
-    [Console]::OutputEncoding = $utf8
-    $global:OutputEncoding = $utf8
 
     # The hooks return at once and leave their work to a detached background
     # child; the caller waits for this process's stdout to reach EOF. Windows
