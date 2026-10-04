@@ -9,7 +9,7 @@
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-5A67D8)](https://github.com/Digital-Process-Tools/claude-marketplace)
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
 [![Antigravity](https://img.shields.io/badge/Antigravity-plugin-4285F4)](docs/install-antigravity.md)
-[![Version](https://img.shields.io/badge/version-0.36.0-orange)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.39.0-orange)](.claude-plugin/plugin.json)
 [![Stars](https://img.shields.io/github/stars/Digital-Process-Tools/claude-remember?style=social)](https://github.com/Digital-Process-Tools/claude-remember/stargazers)
 [![clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Digital-Process-Tools/claude-remember/badges/clones.json)](https://github.com/Digital-Process-Tools/claude-remember/pulse)
 
@@ -158,7 +158,33 @@ Per-session handoff files, the session index, and the temp files `tmp/` holds: [
 
 This plugin runs with your full shell privileges, like any other hook your coding agent runs. The **default install** stores memory locally under `<project>/.remember/` (or `~/.remember/<slug>/` in external mode) and does not push anything anywhere — no new attack surface beyond your coding agent itself.
 
-The optional **git backup** feature does push memory to a remote you configure. If you enable it, read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
+**Git backup** commits (and, if there is a remote, pushes) your memory whenever the external store's parent directory is itself a git repository with an upstream — there is no separate enable flag; that condition alone is the trigger. Read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
+
+### What this plugin runs, sends and stores
+
+**Summarization** shells out to a CLI you already have installed and authenticated — never a bundled binary, never a third-party service beyond the one that CLI already talks to:
+
+- `REMEMBER_SUMMARIZER` selects the provider: `claude` (the nested `claude -p`), `codex` (the nested `codex exec`), or `auto` (the default — reads the transcript the host actually wrote to pick one). `REMEMBER_SUMMARIZER_FALLBACK=claude` (opt-in, unset by default) retries a failed `codex` call via `claude -p` instead of raising, and logs every time it fires.
+- `claude -p` runs with no tools (`--tools ""`), no MCP servers (`--mcp-config '{}' --strict-mcp-config`), no hooks (`--setting-sources ''`), and an isolated temp working directory — not the shared tempdir other concurrent saves use. Verified against claude-code 2.1.219.
+- `codex exec` runs with `--sandbox read-only` (denies writes and network to the process Codex itself spawns — not a guarantee against a command the model asks Codex to run inside that sandbox), `--ignore-user-config` (skips the operator's own Codex hooks), and `-c shell_environment_policy.inherit=none` (a command Codex spawns internally gets no environment at all, not even `PATH`). Verified against codex-cli 0.150.1 / 0.153.2.
+- Either route sends only the extracted, filtered session transcript (the prompt built for that save) to that CLI's own configured provider — never to any other service.
+
+**Credentials.** The summarizer runs your own `claude` CLI with your own login — the same one your interactive session already uses. Nothing is typed in, nothing is read out of your OS credential storage, and the plugin does not ask for your login anywhere.
+
+- Most hosts simply hand that login to every tool and hook they spawn, this one included, and that is the whole story: nothing else to configure, nothing else this plugin does.
+- Some hosts do not hand hooks that login (an older desktop build, a hosted Agent SDK). When that happens, set an optional recovery token through `/plugin` → `remember` → Configure (or `claude plugin config set remember oauth_token <token>`) — Claude Code stores it in its own secure credential store, never in a settings file on disk, and only this plugin's own save can read it back.
+  - Codex has no equivalent "Configure" option, and no recovery-token path at all any more: `codex exec` simply relies on its own host's login, the same as every other tool Codex spawns. Review finding (#860): an earlier draft of this paragraph said Codex kept using the two env/config fallbacks below "unchanged" — that was wrong even before this change, since the recovery-token code has never branched by host, and it is more wrong now that the fallback is gone everywhere.
+  - Two older ways of setting that same recovery token — an environment variable, and a `haiku.oauth_token` key in `config.json` — are no longer read at all, on any host. If either is still set from before, `/remember:doctor` and the daily log say so loudly (by name only, never the value); on Claude Code that notice points at the `/plugin` → `remember` → Configure option above, and on Codex it is simply informational, since there is nothing to move it to.
+- If you also happen to have an unrelated Anthropic API key set in your environment for something else, the plugin leaves it alone when it is your only credential, and unsets it for just this one call when your own login is also available — so an old habit does not quietly bill the wrong account. Set `haiku.anthropic_api_key` to `"keep"` or `"strip"` in `config.json` to decide that for yourself instead.
+- The same applies to an API key set for Codex: Codex's own process picks it up the same way it always would, unrelated to anything this plugin does.
+
+**`git fetch`** (opt-in, `git_restore.enabled` in `config.json`, default `false`) runs a background fetch against the memory store's own git remote before a session starts, so this session can compare local memory against what a backup pushed from elsewhere. It only fast-forwards local refs — it never merges, rebases, or pushes.
+
+**Files written outside the project**, beyond the `REMEMBER_DIR` memory store documented above:
+
+- `~/.remember/tmp/promo-notice` — a marker recording when the plugin-promo line (above) was last shown and which one, so it appears at most once per `cooldowns.promo_seconds` (default 7 days) across all your projects.
+- `~/.remember/run/summarizers/` (override: `REMEMBER_RUNTIME_DIR`) — small per-process records used only to cap how many concurrent summarizer calls can run; holds no transcript content.
+- `$TMPDIR/remember-*` — most of these are temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes. Only a save killed outright (e.g. `SIGKILL`) can leave them behind in `$TMPDIR`. Three files under the same prefix are not scoped to one save and persist by design, written by every hook invocation: `remember-env-<key>` (the project dir, plugin root and HOME), `remember-config-cache-<key>` (a flattened read of `config.json`, excluding `.haiku.*`) and `remember-detect-tools-cache` (which CLIs were found on PATH). None of the three ever holds `haiku.oauth_token` or another secret value.
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
@@ -194,6 +220,7 @@ Everything that used to sit on this page and did not need to be read before inst
 - [Data files](docs/data-files.md)
 - [Git worktrees](docs/git-worktrees.md)
 - [How this repo is maintained](docs/maintainer.md)
+- [Releasing, and the `release` branch the Anthropic directory reads](docs/releasing.md)
 - [Configuration](docs/configuration.md)
 - [External storage mode](docs/external-storage-mode.md)
 - [Git backup security](docs/git-backup-security.md)
