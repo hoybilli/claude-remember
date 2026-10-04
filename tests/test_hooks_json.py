@@ -688,6 +688,29 @@ def test_launcher_error_exits_zero(tmp_path):
     assert b"claude-remember: launcher error" in result.stderr
 
 
+@_needs_win_launcher
+@pytest.mark.parametrize("manifest", [False, True])
+def test_launcher_error_line_keeps_non_ascii_paths_as_utf8(tmp_path, manifest):
+    """The launcher's own stderr lines carry paths and localized exception
+    text, so they leave as UTF-8, not in the console's OEM code page. The
+    ASCII root is the positive control: it produces the same error line."""
+    def run(dirname):
+        bogus = tmp_path / dirname / "bash.exe"
+        bogus.parent.mkdir()
+        bogus.write_text("not a program", encoding="utf-8")
+        root = _fake_plugin(tmp_path / dirname, {"probe.sh": "cat >/dev/null\n"})
+        env = _launcher_env(root, {"REMEMBER_BASH": str(bogus)})
+        return _powershell(_launcher_args(root, "probe.sh", manifest), env)
+
+    plain = run("plain")
+    assert plain.returncode == 0, plain.stderr
+    assert b"claude-remember: launcher error" in plain.stderr
+    accented = run("José")
+    assert accented.returncode == 0, accented.stderr
+    assert b"claude-remember: launcher error" in accented.stderr
+    assert "José".encode("utf-8") in accented.stderr, accented.stderr
+
+
 # The hooks return at once and leave their work (a save, a consolidation) to a
 # detached background child. The caller waits for the hook's stdout to reach
 # EOF (observed here; reasoned for VS Code), so the launcher must not let that

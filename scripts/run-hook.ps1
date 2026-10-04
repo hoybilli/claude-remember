@@ -75,6 +75,11 @@ try {
         exit $LASTEXITCODE
     }
 
+    # The launcher's own stderr lines carry paths and localized exception text;
+    # emit them as UTF-8 rather than the console's OEM code page. Not set under
+    # Constrained Language Mode above (the call is refused there).
+    try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+
     # The hooks return at once and leave their work to a detached background
     # child; the caller waits for this process's stdout to reach EOF. Windows
     # PowerShell 5.1 holds an extra inheritable duplicate of its stdout handle,

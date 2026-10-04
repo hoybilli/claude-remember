@@ -339,8 +339,12 @@ CLAMPED = "session-end: cooldowns.turn_end_debounce_seconds=999999 clamped to 36
 # sandbox's hook is the clamp case's sleeper.
 _STOP_SLEEPER = r'''p=$1 hook=$2
 if [ -n "$p" ]; then
+    # Stop the parent first so it can fork nothing between the child listing
+    # and the kill (a `sleep 3600` forked in that gap would be orphaned).
+    kill -STOP "$p" 2>/dev/null
     kids=$(ps -ef 2>/dev/null | awk -v p="$p" '$3==p {print $2}')
     kill $kids "$p" 2>/dev/null
+    kill -CONT "$p" 2>/dev/null
 fi
 ps -ef 2>/dev/null | awk '$NF=="3600" && $(NF-1) ~ /(^|\/)sleep$/ {print $2, $3}' |
 while read -r kid parent; do
