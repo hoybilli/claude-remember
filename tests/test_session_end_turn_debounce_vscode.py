@@ -55,9 +55,15 @@ WINDOW_S = 2
 # that gap is turn 2's whole detached preamble (~1 s on a desktop, measured
 # past 3 s on a slow Windows machine, #560), so the window is set well above it.
 BURST_WINDOW_S = 8
-# Case 2 asserts the host-facing hook returned inside the window, so the
-# window must sit well above a cold Git Bash start on a loaded runner.
+# Case 2's debounce window: only what the deferred save must wait, measured
+# from the token file. Kept short so the case stays quick.
 EXPIRY_WINDOW_S = 4
+# Case 2's sanity bound on how long the host-facing hook took to return.
+# Deliberately NOT tied to EXPIRY_WINDOW_S: the proof that the sleep is in
+# the background is `returned_at < saved_at`, not this number. It is only a
+# hang detector, so it gets the slow-runner figure above (~3.4 s, #560) with
+# more than 2x margin, and a slow runner cannot fail the case through it.
+HOOK_RETURN_BOUND_S = 10
 POLL_DEADLINE_S = 40
 KEY = "turn_end_debounce_seconds"
 DEFERRED = "session-end: turn-end save deferred"
@@ -250,18 +256,23 @@ def test_debounce_two_turns_in_a_burst_save_exactly_once(tmp_path):
 
 def test_debounce_window_expires_then_saves_and_the_hook_did_not_wait(tmp_path):
     sb = Sandbox(tmp_path, key_value=EXPIRY_WINDOW_S)
-    elapsed, _returned_at = sb.run_hook(copilot=True)
+    elapsed, returned_at = sb.run_hook(copilot=True)
 
-    # The sleep is in the detached background, not in the hook the host waits
-    # on: were it in the foreground the hook could not return inside it.
-    assert elapsed < EXPIRY_WINDOW_S, (
-        f"hook took {elapsed:.2f}s against a {EXPIRY_WINDOW_S}s window")
+    # Hang detector only (see HOOK_RETURN_BOUND_S); the background proof is
+    # the returned_at < saved_at assertion below.
+    assert elapsed < HOOK_RETURN_BOUND_S, (
+        f"hook took {elapsed:.2f}s to return (bound {HOOK_RETURN_BOUND_S}s)")
 
     # The window starts at the token write (the detached child writes it just
     # before forking the sleeper), not when the host-facing process returned.
     _token, token_mtime = sb.wait_for_token()
     sb.wait_for(lambda: len(sb.saves()) >= 1, "the deferred save to run")
     saved_at = sb.saves()[0].stat().st_mtime
+    # The sleep is in the detached background, not in the hook the host waits
+    # on: the hook had already returned when the deferred save ran.
+    assert returned_at < saved_at, (
+        f"the deferred save ran {returned_at - saved_at:.2f}s BEFORE the hook "
+        f"returned -- the hook waited for it")
     assert saved_at - token_mtime >= EXPIRY_WINDOW_S, (
         f"save ran {saved_at - token_mtime:.2f}s after the token was written; "
         f"the debounce window is {EXPIRY_WINDOW_S}s")
