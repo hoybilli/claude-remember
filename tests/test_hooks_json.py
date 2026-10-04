@@ -674,15 +674,17 @@ def test_launcher_error_exits_zero(tmp_path):
 
 
 # The hooks return at once and leave their work (a save, a consolidation) to a
-# detached background child. VS Code waits for the hook's stdout to reach EOF,
-# so the launcher must not let that child inherit a handle to the caller's
-# stdout or stderr pipe: Windows PowerShell 5.1 holds an extra inheritable
-# duplicate of its own stdout handle, and every process it starts inherits
-# every inheritable handle it holds (observed; docs/install-vscode.md). Margins
-# are wide on purpose: a 15 s background sleeper against a < 5 s return bound,
-# and a 3 s foreground sleep against a >= 3 s bound.
+# detached background child. The caller waits for the hook's stdout to reach
+# EOF (observed here; reasoned for VS Code), so the launcher must not let that
+# child inherit a handle to the caller's stdout or stderr pipe: Windows
+# PowerShell 5.1 holds an extra inheritable duplicate of its own stdout handle,
+# and every process it starts inherits every inheritable handle it holds
+# (observed; docs/install-vscode.md). Margins are wide on purpose: a broken
+# launcher is held for the whole 15 s background sleep, so the return bound sits
+# 5 s below it (10 s) rather than near launcher start-up; and a 3 s foreground
+# sleep is checked against a >= 3 s bound.
 _BG_SLEEP_S = 15
-_RETURN_BOUND_S = 5
+_RETURN_BOUND_S = _BG_SLEEP_S - 5
 _FG_SLEEP_S = 3
 _BG_STDOUT = "stub stdout ünï – 日本"
 
@@ -800,6 +802,8 @@ def test_launcher_runs_the_hook_when_the_handle_step_fails(tmp_path):
         {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")})
     assert marker.is_file(), result.stderr
     assert result.returncode == 4, result.stderr
+    assert b"claude-remember: launcher: could not detach background work" in result.stderr
+    assert b"the host will wait for it" in result.stderr
 
 
 def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):

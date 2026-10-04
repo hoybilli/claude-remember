@@ -55,9 +55,12 @@ try {
     # until it finished. Clear the inherit flag on every handle but the three
     # standard ones (which bash receives as its own stdio and does not pass to a
     # child whose fds it redirected). Best effort: if this step fails (e.g.
-    # Add-Type cannot compile), the hook still runs and the caller just waits
-    # for the background work, as it did before.
+    # Add-Type cannot compile), one line goes to stderr, the hook still runs and
+    # the caller just waits for the background work, as it did before.
     try {
+        # The type is never already loaded under the -File entry (a fresh
+        # process per hook); only an in-process reuse of the launcher (and the
+        # fallback test) finds it loaded and skips Add-Type.
         if (-not ('ClaudeRemember.Handles' -as [type])) {
             Add-Type -Namespace ClaudeRemember -Name Handles -MemberDefinition @'
 [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
@@ -74,7 +77,9 @@ public static void KeepOnlyStdioInheritable() {
 '@
         }
         [ClaudeRemember.Handles]::KeepOnlyStdioInheritable()
-    } catch { }
+    } catch {
+        [Console]::Error.WriteLine("claude-remember: launcher: could not detach background work ($_); the host will wait for it")
+    }
 
     $payload = [Console]::In.ReadToEnd()
     $payload | & $bash $target @Rest
