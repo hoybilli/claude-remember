@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402
 
-UUID = "56adc774-ffde-4486-86ec-babdef137ae5"
+UUID = "11111111-2222-4333-8444-555555555555"
 VERDICT_144 = (
     "VERDICT: problem -- session dir slug does not match Claude Code's "
     "transcript directory (#144); restarting will not help"

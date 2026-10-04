@@ -16,7 +16,7 @@ LIB = REPO_ROOT / "scripts" / "lib-session-id.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
 
-UUID = "56adc774-ffde-4486-86ec-babdef137ae5"
+UUID = "11111111-2222-4333-8444-555555555555"
 
 # The exact validator every hook already applies, copied verbatim so the test
 # proves the two layers agree rather than re-implementing either.

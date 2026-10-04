@@ -17,7 +17,7 @@ HOOK = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
 
-UUID = "56adc774-ffde-4486-86ec-babdef137ae5"
+UUID = "11111111-2222-4333-8444-555555555555"
 
 
 def _layout(tmp_path, with_copilot: bool):
@@ -34,7 +34,7 @@ def _layout(tmp_path, with_copilot: bool):
     return home, project, remember
 
 
-def _run(home, project, remember):
+def _run(home, project, remember, session_id=f"agent-host-copilotcli:/{UUID}"):
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home),
            "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT), "REMEMBER_DIR": str(remember),
            "REMEMBER_DEBUG": "1"}
@@ -42,7 +42,7 @@ def _run(home, project, remember):
     env.pop("REMEMBER_TRANSCRIPT_PATH", None)
     env.pop("COPILOT_HOME", None)
     payload = json.dumps({"hook_event_name": "PostToolUse",
-                          "session_id": f"agent-host-copilotcli:/{UUID}",
+                          "session_id": session_id,
                           "cwd": str(project), "tool_name": "bash", "tool_input": {}})
     r = subprocess.run([BASH, HOOK.as_posix()], input=payload.encode(), env=env,
                        capture_output=True, timeout=120)
@@ -66,6 +66,31 @@ def test_without_copilot_transcript_old_warning_still_fires(tmp_path):
     home, project, remember = _layout(tmp_path, with_copilot=False)
     logs = _run(home, project, remember)
     assert "no session dir for this project" in logs
+
+
+def _tree(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
+
+
+def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
+    """`agent-host-x:/../../x` strips to `../../x`, which the hook's own
+    validator must empty before the Copilot lookup builds a path from it. A
+    decoy events file sits exactly where that path would land (`<home>/x/`),
+    so a missing validator resolves it rather than failing vacuously. The
+    hook exits 0, gives the no-transcript notice the positive control above
+    gives, and writes nothing outside the sandbox store."""
+    home, project, remember = _layout(tmp_path, with_copilot=True)
+    decoy = home / "x"
+    decoy.mkdir()
+    (decoy / "events.jsonl").write_text(
+        '{"type":"user.message","data":{"content":"hi"}}\n', encoding="utf-8")
+    before = _tree(tmp_path)
+    logs = _run(home, project, remember, session_id="agent-host-x:/../../x")
+    assert "no session dir for this project" in logs
+    assert "x/events.jsonl" not in logs.replace("\\", "/")
+    new = _tree(tmp_path) - before
+    outside = sorted(p for p in new if not p.startswith("proj/.remember/"))
+    assert outside == [], outside
 
 
 # Two entry points share one lookup: the print form (run inside $(...)) and the

@@ -9,7 +9,7 @@
 # ambient-variable trap detection must not fall for.
 AI_AGENT=github_copilot_vscode_agent
 CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP=1
-CLAUDE_PLUGIN_DATA=c:\Users\user\.copilot\plugin-data\_direct\515f0c43b0268c27098c7faa3f3ec813a74ca69be5c72c9751463a6131a97670
+CLAUDE_PLUGIN_DATA=c:\Users\user\.copilot\plugin-data\_direct\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 CLAUDE_PLUGIN_ROOT=c:\Users\user\AppData\Roaming\Code\agentPlugins\file-c-3A-Users-user-AppData-Local-Temp-remember-probe-plugin-v3\1a0f47f2cb3
 CLAUDE_PROJECT_DIR=c:\Users\user\proj
 COPILOT_CLI=1
@@ -17,7 +17,7 @@ COPILOT_CLI_RUN_AS_NODE=1
 COPILOT_ENABLE_BUILTIN_GITHUB_MCP=true
 COPILOT_HOME=c:\Users\user\.copilot
 COPILOT_MCP_APPS=true
-COPILOT_PLUGIN_DATA=c:\Users\user\.copilot\plugin-data\_direct\515f0c43b0268c27098c7faa3f3ec813a74ca69be5c72c9751463a6131a97670
+COPILOT_PLUGIN_DATA=c:\Users\user\.copilot\plugin-data\_direct\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 COPILOT_PLUGIN_ROOT=c:\Users\user\AppData\Roaming\Code\agentPlugins\file-c-3A-Users-user-AppData-Local-Temp-remember-probe-plugin-v3\1a0f47f2cb3
 COPILOT_PROJECT_DIR=c:\Users\user\proj
 COPILOT_RUNTIME_PROCESS_FILE_LOGGING=1
