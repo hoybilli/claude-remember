@@ -17,21 +17,21 @@ Versions run: VS Code 1.140.0 (macOS; 1.139.1 to 1.140.0 on Windows), Copilot CL
 
 ## Install
 
-First get a copy without `.git/`, as every successful VS Code run did; on macOS a git checkout can fail to sync (see Troubleshooting). In a terminal (Git Bash on Windows):
+First get a copy without `.git/`, as every successful VS Code run did; on macOS a git checkout can fail to sync. In a terminal (Git Bash on Windows; there write the path with forward slashes, `C:/tools/remember`):
 
 ```
 git clone https://github.com/Digital-Process-Tools/claude-remember.git
 mkdir -p <plugin dir>
-git -C claude-remember archive HEAD | tar -x -C <plugin dir>
+git -c core.autocrlf=false -C claude-remember archive HEAD | tar -x -C <plugin dir>
 ```
 
 **VS Code**
 
-1. Run **Preferences: Open User Settings (JSON)** and add `"chat.pluginLocations": {"<plugin dir>": true}` (absolute path). On Windows, double each backslash: `C:\\tools\\remember`.
+1. Run **Preferences: Open User Settings (JSON)** and add `"chat.pluginLocations": {"<plugin dir>": true}` (absolute path). In settings JSON on Windows, double each backslash: `C:\\tools\\remember`.
 2. Run **Developer: Reload Window**, then open a **New Chat**. The plugin syncs on that first chat, not on the reload (observed on macOS).
 3. To update, export the new version to a new folder and register that path instead: VS Code does not re-copy a registered folder.
 
-**Copilot CLI:** `copilot --plugin-dir <plugin dir>`, or the local marketplace below. End sessions with `/exit`.
+**Copilot CLI:** `copilot --plugin-dir <plugin dir>`, or the local marketplace below.
 
 **Desktop app:** install through the local marketplace below with the `copilot` CLI, then start a new chat **with a Project attached**. Without one, memory goes under `~/.copilot/chats/<date>/<slug>/`, not your project (observed on Windows). On Windows the plugin never appeared under Installed, although its hooks ran and saved; use [Check it works](#check-it-works) instead.
 
@@ -39,7 +39,7 @@ git -C claude-remember archive HEAD | tar -x -C <plugin dir>
 
 ```
 mkdir -p <marketplace dir>/.claude-plugin <marketplace dir>/remember
-git -C claude-remember archive HEAD | tar -x -C <marketplace dir>/remember
+git -c core.autocrlf=false -C claude-remember archive HEAD | tar -x -C <marketplace dir>/remember
 ```
 
 Put this in `<marketplace dir>/.claude-plugin/marketplace.json`:
@@ -54,7 +54,7 @@ Then run `copilot plugin marketplace add <marketplace dir>` (it prints `Marketpl
 
 ## Check it works
 
-After a first turn (in the CLI, after `/exit`), run `bash <plugin dir>/scripts/doctor.sh` (marketplace installs: `<marketplace dir>/remember`) from the project folder (Git Bash on Windows; needs `jq`). Expect `OK   last save came from a VS Code Agents / Copilot session` and `VERDICT: capture is working` (observed on macOS). On a project never opened in Claude Code, `FAIL Session dir MISSING` is expected. Any other `VERDICT: problem …` line names a real problem.
+After a first turn's save has finished (a few seconds; `N` more with debounce; in the CLI, after `/exit`), run `bash <plugin dir>/scripts/doctor.sh` (marketplace installs: `<marketplace dir>/remember`) from the project folder (Git Bash on Windows; needs `jq`). Expect `OK   last save came from a VS Code Agents / Copilot session` and `VERDICT: capture is working` (observed on macOS). On a project never opened in Claude Code, `FAIL Session dir MISSING` is expected. Any other `VERDICT: problem …` line names a real problem.
 
 ## How saving works here
 
@@ -90,5 +90,5 @@ Open questions and follow-ups are in [the record](vscode-verification.md#coverag
 
 - The per-prompt time stamp (`prompt_stamp`, Claude Code's `[14:30 CEST -- user]` line) is not injected on these hosts (observed in VS Code and the CLI; reasoned for the desktop app).
 - On Windows machines locked down with AppLocker or WDAC (Constrained Language Mode), the launcher cannot detach the save, so each turn waits for it (reasoned; the launcher's CLM path ran only in a test that set the mode in process).
-- An execution policy set by Group Policy overrides the launcher's `-ExecutionPolicy Bypass`; if it is `Restricted` or `AllSigned`, the unsigned launcher is blocked (reasoned, not observed). Check with `Get-ExecutionPolicy -List` in PowerShell; a `MachinePolicy` or `UserPolicy` value applies.
+- An execution policy set by Group Policy overrides the launcher's `-ExecutionPolicy Bypass`; if it is `Restricted` or `AllSigned`, the unsigned launcher is blocked (reasoned, not observed). Check with `Get-ExecutionPolicy -List` in PowerShell; a `MachinePolicy` or `UserPolicy` other than `Undefined` applies.
 - On a project also used from Claude Code, a Copilot save can make `doctor.sh` say `capture is working` while Claude Code's capture is broken; only the `FAIL` line hints at it (reasoned).
