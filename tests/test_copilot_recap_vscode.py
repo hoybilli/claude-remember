@@ -1,28 +1,69 @@
 """pipeline/copilot_recap.py: the Python half of session-start-hook.sh's
 Copilot recap emit (issue: vscode). The envelope it writes must be byte for
-byte what the hook used to print with `jq -Rs '{additionalContext:.}'` and
-`printf '%s\\n'` -- compared here against the real jq on whatever platform
-runs the suite (the Windows text-mode CRLF behaviour included, observed with
-jq 1.8.2 on Windows 11; Linux/macOS are compared on their own CI legs).
+byte what the hook used to print. The oracle is the hook's own two old lines,
+run through bash with whatever jq that bash finds -- the jq the hook would
+have used:
+
+    _REMEMBER_HOST_JSON=$(jq -Rs '{additionalContext:.}' < "$file")
+    printf '%s\\n' "$_REMEMBER_HOST_JSON"
+
+so the command substitution's own trimming is part of what is compared (Git
+Bash's `$(...)` drops a trailing CR as well as the LF a native Windows jq
+writes). Without bash or jq the comparisons skip, never pass vacuously.
 """
 from __future__ import annotations
 
+import functools
 import json
 import random
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from ._bash_runner import decode_bash_output, resolve_bash
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline import copilot_recap  # noqa: E402
 
-JQ = shutil.which("jq")
-needs_jq = pytest.mark.skipif(JQ is None, reason="needs jq to compare against")
+BASH = resolve_bash()
+
+_OLD_TWO_LINES = r'''
+for f in "$1"/in/*; do
+    _REMEMBER_HOST_JSON=$(jq -Rs '{additionalContext:.}' < "$f")
+    printf '%s\n' "$_REMEMBER_HOST_JSON" > "$1/out/${f##*/}"
+done
+'''
+
+
+@functools.lru_cache(maxsize=1)
+def _bash_jq() -> str:
+    """The jq the hook's bash would run, or "" when there is none."""
+    if BASH is None:
+        return ""
+    r = subprocess.run([BASH, "-c", "command -v jq"], capture_output=True, timeout=60)
+    return decode_bash_output(r.stdout).strip() if r.returncode == 0 else ""
+
+
+needs_jq = pytest.mark.skipif(
+    not _bash_jq(), reason="needs bash and a jq it can find: the old hook lines are the oracle")
+
+
+def _old_outputs(recaps: list[bytes], tmp_path: Path) -> list[bytes]:
+    """What the old hook printed for each recap, from ONE bash run of its two
+    old lines."""
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
+    names = [f"recap-{n:05d}" for n in range(len(recaps))]
+    for name, recap in zip(names, recaps):
+        (tmp_path / "in" / name).write_bytes(recap)
+    r = subprocess.run([BASH, "-c", _OLD_TWO_LINES, "bash", tmp_path.as_posix()],
+                       capture_output=True, timeout=600)
+    assert r.returncode == 0, decode_bash_output(r.stderr)
+    return [(tmp_path / "out" / name).read_bytes() for name in names]
 
 _HOST_ENV = ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
              "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "COPILOT_CLI",
@@ -52,34 +93,32 @@ def _fuzz(count=200, seed=5):
             for _ in range(count)]
 
 
-def _jq_envelope(recap: bytes) -> bytes:
-    """What the hook printed: `$(jq ...)` drops the trailing newlines, then
-    `printf '%s\\n'` adds one back."""
-    out = subprocess.run([JQ, "-Rs", "{additionalContext:.}"], input=recap,
-                         capture_output=True, check=True).stdout
-    return out.rstrip(b"\n") + b"\n"
+def _mismatches(recaps, tmp_path):
+    old = _old_outputs(recaps, tmp_path)
+    assert len(old) == len(recaps) and all(old)  # positive control: every case ran
+    return [(r, o, copilot_recap.envelope(r)) for r, o in zip(recaps, old)
+            if copilot_recap.envelope(r) != o]
 
 
 @needs_jq
-@pytest.mark.parametrize("recap", _NAMED, ids=range(len(_NAMED)))
-def test_envelope_is_byte_identical_to_jq_named(recap):
-    assert copilot_recap.envelope(recap) == _jq_envelope(recap)
+def test_envelope_is_byte_identical_to_the_old_hook_lines_named(tmp_path):
+    assert _mismatches(_NAMED, tmp_path) == []
 
 
 @needs_jq
-def test_envelope_is_byte_identical_to_jq_fuzzed():
-    bad = [c for c in _fuzz() if copilot_recap.envelope(c) != _jq_envelope(c)]
-    assert bad == []
+def test_envelope_is_byte_identical_to_the_old_hook_lines_fuzzed(tmp_path):
+    assert _mismatches(_fuzz(), tmp_path) == []
 
 
 def test_envelope_shape_on_both_line_ending_modes():
     """Platform-independent: one top-level key, the recap as its value; the
-    Windows mode differs only in CRLF handling."""
+    Windows mode differs only in CRLF handling -- CRLF inside the envelope,
+    and the single LF the old `printf '%s\\n'` ended it with."""
     recap = b"line one\r\nline two\n"
     unix = copilot_recap.envelope(recap, windows=False)
     win = copilot_recap.envelope(recap, windows=True)
     assert unix == b'{\n  "additionalContext": "line one\\r\\nline two\\n"\n}\n'
-    assert win == b'{\r\n  "additionalContext": "line one\\nline two\\n"\r\n}\r\n'
+    assert win == b'{\r\n  "additionalContext": "line one\\nline two\\n"\r\n}\n'
     assert json.loads(unix) == {"additionalContext": "line one\r\nline two\n"}
 
 
@@ -124,50 +163,68 @@ def test_main_logs_nothing_unbuffered_off_the_copilot_host(tmp_path, monkeypatch
     assert not (tmp_path / "logs").exists()
 
 
-def test_a_failed_write_puts_the_recap_back(tmp_path, monkeypatch):
-    """The hook's fallback `cat`s the file after a failure, so it must hold
-    the plain recap again, not a half-written envelope."""
+# ── A failed rewrite leaves the plain recap ─────────────────────────────────
+# The hook's fallback `cat`s the file after a failure, so it must hold the
+# plain recap again, not a half-written envelope. The disk-full error is
+# simulated at the two points it can surface: part way through a write, and
+# at truncate time (where a buffered file would have flushed). Each case also
+# checks the failure really fired, so it cannot pass by never failing.
+
+_ORIGINAL = b"=== REMEMBER ===\n" + b"PROBE\n" * 100  # well under 8 KB
+
+
+def _disk_full():
+    return OSError(28, "No space left on device")
+
+
+def test_a_write_failing_part_way_puts_the_recap_back(tmp_path, monkeypatch):
     _env(monkeypatch, COPILOT_CLI="1")
     recap = tmp_path / "ctx"
-    original = b"=== REMEMBER ===\n" + b"PROBE\n" * 100
-    recap.write_bytes(original)
-    real_envelope = copilot_recap.envelope
+    recap.write_bytes(_ORIGINAL)
+    real_write = copilot_recap.os.write
+    fired = []
 
-    class Half(bytes):
-        pass
+    def write_half_then_fail(fd, data):
+        if not fired:
+            fired.append(True)
+            real_write(fd, bytes(data[: len(data) // 2]))
+            raise _disk_full()
+        return real_write(fd, data)
 
-    def half_then_fail(data):
-        return Half(real_envelope(data))
-
-    real_open = open
-
-    class FailingWrites:
-        def __init__(self, fh):
-            self._fh = fh
-            self._writes = 0
-
-        def __getattr__(self, name):
-            return getattr(self._fh, name)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return self._fh.__exit__(*exc)
-
-        def write(self, data):
-            self._writes += 1
-            if isinstance(data, Half):
-                self._fh.write(data[: len(data) // 2])
-                raise OSError("disk full")
-            return self._fh.write(data)
-
-    def fake_open(path, mode="r", *args, **kwargs):
-        return FailingWrites(real_open(path, mode, *args, **kwargs))
-
-    monkeypatch.setattr(copilot_recap, "envelope", half_then_fail)
-    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(copilot_recap.os, "write", write_half_then_fail)
     with pytest.raises(OSError):
         copilot_recap.main([str(recap)])
     monkeypatch.undo()
-    assert recap.read_bytes() == original
+    assert fired
+    assert recap.read_bytes() == _ORIGINAL
+
+
+def test_a_truncate_failing_puts_the_recap_back(tmp_path, monkeypatch):
+    _env(monkeypatch, COPILOT_CLI="1")
+    recap = tmp_path / "ctx"
+    recap.write_bytes(_ORIGINAL)
+    real_ftruncate = copilot_recap.os.ftruncate
+    fired = []
+
+    def fail_once(fd, length):
+        if not fired:
+            fired.append(True)
+            raise _disk_full()
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(copilot_recap.os, "ftruncate", fail_once)
+    with pytest.raises(OSError):
+        copilot_recap.main([str(recap)])
+    monkeypatch.undo()
+    assert fired
+    assert recap.read_bytes() == _ORIGINAL
+
+
+def test_a_successful_rewrite_holds_exactly_the_envelope(tmp_path, monkeypatch):
+    """Positive control for the two above: no failure, the envelope, and not
+    a byte of the longer original left behind past its end."""
+    _env(monkeypatch, COPILOT_CLI="1")
+    recap = tmp_path / "ctx"
+    recap.write_bytes(_ORIGINAL)
+    assert copilot_recap.main([str(recap)]) == 0
+    assert recap.read_bytes() == copilot_recap.envelope(_ORIGINAL)

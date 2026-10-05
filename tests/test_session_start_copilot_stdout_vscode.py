@@ -335,6 +335,61 @@ def test_promo_on_copilot_helper_failure_still_skips_the_promo(tmp_path):
     _assert_plain(out)
 
 
+def _recording_python_dir(tmp_path):
+    """`python3` / `python` / `py` stubs that record their argv to calls.txt
+    and then run the real interpreter -- so the helper really runs, and the
+    test can see that it did. Returns (dir, calls)."""
+    d = tmp_path / "python-recorder"
+    d.mkdir()
+    calls = tmp_path / "calls.txt"
+    real = Path(sys.executable).as_posix()
+    body = ("#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{calls.as_posix()}'\n"
+            "[ \"$1\" = -3 ] && shift\n"
+            f"exec '{real}' \"$@\"\n")
+    for name in _PY_NAMES:
+        stub = d / name
+        stub.write_bytes(body.encode())
+        stub.chmod(0o755)
+    return d, calls
+
+
+def _normalised(text, root):
+    """TEXT with this run's sandbox root and the log's clock and duration
+    taken out, so two sandboxes' runs compare line for line."""
+    lines = []
+    for line in text.replace(str(root), "<root>").replace(root.as_posix(), "<root>").splitlines():
+        if line[:9].count(":") == 2 and line[8:9] == " ":
+            line = line[9:]
+        if line.startswith("[hook] session-start took "):
+            continue
+        lines.append(line)
+    return lines
+
+
+def test_false_positive_trigger_changes_nothing(tmp_path):
+    """A Claude Code session whose environment also carries COPILOT_CLI fires
+    the cheap trigger: the helper runs (the recorder sees it), applies the
+    exact rule -- Claude Code's signature wins -- and changes nothing. Its
+    stdout and log lines equal the same run without COPILOT_CLI, which is
+    the paired control (and which never calls the helper at all)."""
+    results = {}
+    for name, extra in (("control", {}), ("copilot-var", {"COPILOT_CLI": "1"})):
+        root = tmp_path / name
+        root.mkdir()
+        rec_dir, calls = _recording_python_dir(root)
+        env = _stub_env(rec_dir, {"CLAUDE_CODE_ENTRYPOINT": "cli", **extra})
+        out = _run(root, UUID, env)
+        results[name] = (_normalised(out, root), _normalised(_logs(root), root), _calls(calls))
+    control, fired = results["control"], results["copilot-var"]
+    assert "-m pipeline.copilot_recap" in fired[2]  # the helper really ran
+    assert control[2] == ""                         # the control never forked
+    _assert_plain("\n".join(control[0]))
+    assert fired[0] == control[0]
+    assert fired[1] == control[1]
+    assert any("session-start" in line for line in control[1])
+
+
 def test_copilot_unbuffered_recap_is_logged(tmp_path):
     """REMEMBER_TRACE=1 skips the context buffer (the #712 trace path), so the
     recap is printed live and cannot be wrapped: logged on the copilot host."""

@@ -28,8 +28,8 @@ the hook to keep the compiled hook inside v0.40.0's size budget
 
 Any failure raises, so the interpreter exits non-zero and the hook falls back
 to the plain recap and logs it. A write that fails part way puts the
-original bytes back first (``_wrap_in_place``), so that fallback prints the
-recap, not a half-written envelope.
+original bytes back first (``_wrap_in_place`` says exactly what that
+guarantees), so that fallback prints the recap, not a half-written envelope.
 """
 
 from __future__ import annotations
@@ -120,22 +120,36 @@ def envelope(recap: bytes, windows: bool | None = None) -> bytes:
     can only occur inside the string). Invalid UTF-8 is replaced as jq
     replaces it (``_jq_decode``).
 
-    WINDOWS (default: whether this platform is Windows) reproduces the native
-    Windows jq build, observed with jq 1.8.2 on Windows 11: it reads its
-    input in text mode, so each CRLF in the recap arrives as LF, and it
-    writes its output in text mode, so the envelope's own line breaks are
-    CRLF. Not reproduced: a text-mode read also stops at a Ctrl-Z byte
-    (0x1A), which no recap carries."""
+    WINDOWS (default: whether this platform is Windows) reproduces what the
+    hook printed there with a native Windows jq build (observed with jq 1.8.2
+    from WinGet, under Git Bash, on Windows 11): jq reads its input in text
+    mode, so each CRLF in the recap arrives as LF, and writes its output in
+    text mode, so the envelope's own line breaks are CRLF -- except the last:
+    the hook's ``$(...)`` dropped jq's trailing CRLF and ``printf '%s\n'``
+    ended the envelope with a single LF. This assumes a native jq; a user
+    with an MSYS-built jq got LF throughout before, and gets CRLF now. Not
+    reproduced: a text-mode read also stops at a Ctrl-Z byte (0x1A), which
+    no recap carries."""
     if windows is None:
         windows = os.name == "nt"
     if windows:
         recap = recap.replace(b"\r\n", b"\n")
     text = _jq_decode(recap)
     out = json.dumps({"additionalContext": text}, indent=2, ensure_ascii=False)
-    out = out.replace("\x7f", "\\u007f") + "\n"
+    out = out.replace("\x7f", "\\u007f")
     if windows:
         out = out.replace("\n", "\r\n")
-    return out.encode("utf-8")
+    return (out + "\n").encode("utf-8")
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Make the file behind FD hold exactly DATA: unbuffered writes from
+    offset 0, looped until every byte is written, then truncated to fit."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+    os.ftruncate(fd, len(data))
 
 
 def _wrap_in_place(path: str) -> None:
@@ -143,23 +157,33 @@ def _wrap_in_place(path: str) -> None:
 
     In place, not write-then-rename: the hook still holds PATH open as its
     stdout while this runs, and Windows refuses to replace a file another
-    process has open (observed: WinError 5 on Windows 11). Should the write
-    fail part way, the original bytes are put back before the error
-    propagates, so the hook's plain-text fallback prints the recap, never a
-    half-written envelope."""
-    with open(path, "r+b") as fh:
-        original = fh.read()
+    process has open (observed: WinError 5 on Windows 11).
+
+    Unbuffered (``os.write``, no Python file buffer): every byte has reached
+    the file, or failed, by the time ``_write_all`` returns, so a failure
+    surfaces inside the ``try`` -- including one at truncate time -- and is
+    never deferred to a later flush that the restore would trip over. On any
+    failure the original bytes are written back, over space the recap
+    already occupied, before the error propagates; the hook's plain-text
+    fallback then prints the recap. Only if that restore itself fails does
+    its error replace the first one, and the file may then hold neither."""
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        original = b"".join(chunks)
         data = envelope(original)
         try:
-            fh.seek(0)
-            fh.write(data)
-            fh.truncate()
-            fh.flush()
+            _write_all(fd, data)
         except BaseException:
-            fh.seek(0)
-            fh.write(original)
-            fh.truncate()
+            _write_all(fd, original)
             raise
+    finally:
+        os.close(fd)
 
 
 def main(argv: list[str] | None = None) -> int:

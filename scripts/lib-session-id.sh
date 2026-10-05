@@ -8,8 +8,9 @@
 # extension-host hook log, 2026-09-29), and a bare `<uuid>` in the plugin-hook
 # payload (observed 2026-09-30, VS Code 1.139.1 / Windows 11). Both are
 # handled: the prefix is stripped, and the host hint also reads the
-# environment, because the bare form carries no prefix to key on. Every hook
-# then runs the id through the same character allowlist
+# environment, because the bare form carries no prefix to key on. The hooks
+# that source this file (post-tool-hook.sh, session-end-hook.sh) then run the
+# id through the same character allowlist
 # (`''|.|..|-*|*[!A-Za-z0-9._-]*`), which rejects the colon and the slash --
 # correctly: both are path hazards. The uuid after the prefix is the real id
 # (it names ~/.copilot/session-state/<uuid>/), so the prefix is stripped HERE,
@@ -21,9 +22,17 @@
 # remember_session_id_resolve sets REMEMBER_SESSION_ID_NORMALIZED and
 # REMEMBER_SESSION_ID_HINT in the caller's own shell instead of printing them:
 # post-tool-hook.sh runs on every tool call, and each $(...) is a fork that
-# docs/windows.md (#511) measured as slow on Git Bash. Each hook sets and
-# exports REMEMBER_HOST_HINT itself. The hint is a logging/dispatch hint only
-# -- never a path input.
+# docs/windows.md (#511) measured as slow on Git Bash. Each of those hooks
+# sets and exports REMEMBER_HOST_HINT itself from the result. The hint is a
+# logging/dispatch hint only -- never a path input.
+#
+# session-start-hook.sh does NOT source this file (it kept the compiled hook
+# over v0.40.0's size budget). It inlines only the prefix half -- the same
+# strip, and REMEMBER_HOST_HINT=copilot when the prefix was there -- and the
+# environment half is applied by pipeline.host.copilot_session(), the same
+# rule in Python, in the one helper call that hook makes
+# (pipeline/copilot_recap.py). tests/test_session_start_host_rule_vscode.py
+# compares the two against remember_session_id_resolve below.
 #
 # USAGE
 #   source "$_HOOK_DIR/lib-session-id.sh"
