@@ -2398,30 +2398,21 @@ fi
 # `hookSpecificOutput` first, so "unsupported" cannot be told from "a later
 # command's JSON won" -- the top-level shape is the one proven to inject.
 #
-# The trigger below is cheap and deliberately wider than the host rule: the
-# session id carried the agent-host prefix (REMEMBER_HOST_HINT, set above), or
-# a Copilot signature variable is non-empty. Claude Code, Codex and
-# Antigravity sessions without a Copilot variable never reach the fork. Past
-# the trigger, ONE Python call (pipeline/copilot_recap.py) applies the exact
-# rule -- the same as scripts/lib-session-id.sh's resolver -- and prints the
-# exact hint ("copilot" or nothing) into REMEMBER_HOST_HINT. On the Copilot
-# host it also:
-#   - recap buffered: rewrites the buffer file, in place, to the
-#     recap wrapped as {"additionalContext": ...} -- byte for byte what
-#     `jq -Rs` printed before (now also without jq, since Python builds it),
-#     so the plain `cat` below prints the envelope;
-#   - recap NOT buffered (a trace is running, or tmp/ is not writable): logs
-#     that the recap went out live as plain text, which this host does not
-#     inject.
-# On any other host it changes nothing, so the branches below run unchanged.
-# The helper lives in pipeline/, not in this file, to keep the compiled hook
-# inside v0.40.0's size budget. If it cannot run (no Python, or a non-zero
-# exit) the buffer still holds the plain recap (the helper puts it back if its
-# own write fails part way), so the recap goes out as plain text, and that is
-# logged. On the Copilot host -- and when the helper failed, as the host
-# is then unknown -- PROMO_MSG is cleared: promos are skipped there on purpose
-# (`systemMessage` was not probed), and with no promo shown no marker is
-# written, so nothing is burned.
+# The trigger below is cheap and deliberately wider than the host rule
+# (described in scripts/lib-session-id.sh): the session id carried the
+# agent-host prefix (REMEMBER_HOST_HINT, set above), or a Copilot signature
+# variable is non-empty. Claude Code, Codex and Antigravity sessions without a
+# Copilot variable never reach the fork. Past it, ONE Python call
+# (pipeline/copilot_recap.py, whose docstring says what it does on each host)
+# applies the exact rule, wraps the buffered recap in the envelope on the
+# Copilot host, and prints the exact hint ("copilot" or nothing) into
+# REMEMBER_HOST_HINT. It lives in pipeline/ to keep the compiled hook inside
+# v0.40.0's size budget. If it cannot run (no Python, or a non-zero exit) the
+# buffer still holds the plain recap, so that goes out, and that is logged. On
+# the Copilot host -- and when the helper failed, as the host is then unknown
+# -- PROMO_MSG is cleared: promos are skipped there on purpose (`systemMessage`
+# was not probed), and with no promo shown no marker is written, so nothing is
+# burned.
 if [ -n "$REMEMBER_HOST_HINT$COPILOT_CLI$COPILOT_PLUGIN_ROOT" ] \
     && ! REMEMBER_HOST_HINT=$(_remember_python && cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.copilot_recap "${_REMEMBER_CTX_OK:+$_REMEMBER_CTX_FILE}" 2>/dev/null); then
     PROMO_MSG=""

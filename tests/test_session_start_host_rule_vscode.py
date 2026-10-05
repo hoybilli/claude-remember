@@ -12,7 +12,7 @@ give the same normalized id and the same host hint, and the trigger fires
 whenever the old hint was copilot. The inline lines are read out of the hook
 itself, so the test follows the real code.
 
-It also pins the Python rule's variable names against pipeline.host.REGISTRY,
+It also pins the shell's signature names against pipeline.host.REGISTRY,
 and the "vanished transcript" receipt that moved from the hook into
 pipeline/haiku.py.
 """
@@ -134,18 +134,14 @@ def test_inline_strip_plus_python_rule_equals_the_old_resolver(monkeypatch):
     assert fired_for_copilot > 0  # positive control: copilot cases were in the set
 
 
-def test_python_rule_reads_the_registry_signature_names():
-    """The literal names copilot_session() reads are exactly the signature
-    variables of COPILOT and of every host REGISTRY lists before it."""
+def test_shell_signature_names_are_the_registry_names():
+    """_SIGNATURES (the names the shell resolver tests, written out by hand
+    so the comparison above cannot lose one with the registry) are exactly
+    the signature variables of COPILOT and of every host REGISTRY lists
+    before it."""
     before = _host.REGISTRY[:_host.REGISTRY.index(_host.COPILOT)]
     expected = {v for h in before for v in h.signature_vars} | set(_host.COPILOT.signature_vars)
     assert expected == set(_SIGNATURES)
-    source = Path(_host.__file__).read_text(encoding="utf-8")
-    start = source.index("def copilot_session()")
-    body = source[start:source.index("\ndef ", start + 1)]
-    assert "return bool(" in body  # positive control: the whole function
-    for name in expected:
-        assert f'os.environ.get("{name}", "")' in body, name
 
 
 # ── The vanished-transcript receipt, now decided in pipeline/haiku.py ──────

@@ -10,8 +10,8 @@ id carried the ``agent-host-*:/`` prefix, or ``COPILOT_CLI`` /
 the hook to keep the compiled hook inside v0.40.0's size budget
 (``HOOK_SCRIPT_MAX_BYTES``).
 
-1. Applies the exact host rule, ``pipeline.host.copilot_session`` -- the same
-   rule as ``scripts/lib-session-id.sh``'s resolver.
+1. Applies the exact host rule, ``pipeline.host.copilot_session`` (described
+   in ``scripts/lib-session-id.sh``).
 2. Not the Copilot host: changes nothing, prints nothing, exits 0. The hook's
    own branches (promo envelope, or the plain recap) then run unchanged.
 3. Copilot host, RECAP_FILE given (the hook buffered its recap there):

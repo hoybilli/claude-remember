@@ -49,6 +49,8 @@
 # id to use) and REMEMBER_SESSION_ID_HINT ("copilot" or ""); both are
 # overwritten on every call. Always returns 0. No command substitution.
 #
+# THE HOST RULE -- described here once; pipeline.host.copilot_session(), the
+# session-start hook and pipeline/copilot_recap.py point back to it.
 # The hint is "copilot" when RAW has the agent-host prefix, or when the
 # environment carries Copilot's signature and no signature of a host that
 # pipeline/host.REGISTRY lists before COPILOT -- the same first-match order
@@ -60,6 +62,11 @@
 # so a Codex or Antigravity session whose environment also carries COPILOT_CLI
 # keeps its own plain-text recap. COPILOT_HOME is deliberately not consulted:
 # a configuration path a user may set anywhere is not a signature (#463).
+# A signature counts when it is non-empty, whitespace included (`[ -n ]`) --
+# unlike detect_host, which strips. The Python side applies the same rule
+# from REGISTRY, and first accepts REMEMBER_HOST_HINT=copilot, which every
+# hook exports: the prefix half alone (session-start) or this resolver's whole
+# answer (post-tool, session-end).
 remember_session_id_resolve() {
     REMEMBER_SESSION_ID_HINT=""
     if [[ "$1" == agent-host-*:/* ]]; then

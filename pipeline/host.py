@@ -313,36 +313,21 @@ def detect_host(overrides: Mapping[str, str] | None = None) -> Host:
 
 def copilot_session() -> bool:
     """Whether this process serves a VS Code Agents / Copilot session (issue:
-    vscode), by exactly the rule ``remember_session_id_resolve`` in
-    ``scripts/lib-session-id.sh`` applies -- so the shell hooks and the
-    Python side never disagree about the host.
+    vscode): ``remember_session_id_resolve``'s rule, described once in
+    ``scripts/lib-session-id.sh``; tests/test_session_start_host_rule_vscode.py
+    pins this against it.
 
-    True when ``REMEMBER_HOST_HINT`` is ``copilot`` -- every hook exports it:
-    session-start-hook.sh sets it from the session id's ``agent-host-*:/``
-    prefix alone; post-tool-hook.sh and session-end-hook.sh export the
-    resolver's full answer, which this rule reproduces either way. Otherwise
-    True when ``COPILOT_CLI`` or ``COPILOT_PLUGIN_ROOT`` is non-empty and no
-    signature variable of a host that ``REGISTRY`` lists before ``COPILOT``
-    is (Claude Code, Codex, Antigravity): the same first-match order
-    ``detect_host`` uses.
-
-    Deliberately not ``detect_host() is COPILOT``: that reads a value set
-    only when it is non-blank after ``strip()``, while the shell's
-    ``[ -n ]`` / ``[ -z ]`` count a whitespace-only value as set; and it has
-    no notion of the session-id prefix. Each variable is read by its literal
-    name (#898 round 10); tests/test_session_start_host_rule_vscode.py pins
-    the names against ``REGISTRY`` and the rule against the shell resolver.
+    Not ``detect_host() is COPILOT``: the hint comes first, and a signature
+    value counts when it is non-empty, unstripped, as the shell's ``[ -n ]``
+    counts it.
     """
     if os.environ.get("REMEMBER_HOST_HINT", "") == "copilot":
         return True
-    if (os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-            or os.environ.get("CODEX_SESSION_ID", "")
-            or os.environ.get("CODEX_THREAD_ID", "")
-            or os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "")):
-        return False
-    return bool(os.environ.get("COPILOT_CLI", "")
-                or os.environ.get("COPILOT_PLUGIN_ROOT", ""))
+    values = _environment_values()
+    for host in REGISTRY:
+        if any(values.get(name) for name in host.signature_vars):
+            return host is COPILOT
+    return False
 
 
 def plugin_root(overrides: Mapping[str, str] | None = None) -> str | None:
@@ -553,13 +538,13 @@ def _format_copilot_tool_request(req: dict) -> str:
     name = req.get("name") or "?"
     args = req.get("arguments")
     if isinstance(args, str):
-        raw = args
-        if len(raw) > _COPILOT_ARGS_DECODE_MAX:
-            return f"[TOOL: {name} `{raw[:80]}`]"
+        as_raw = f"[TOOL: {name} `{args[:80]}`]"
+        if len(args) > _COPILOT_ARGS_DECODE_MAX:
+            return as_raw
         try:
-            args = json.loads(raw)
+            args = json.loads(args)
         except RecursionError:
-            return f"[TOOL: {name} `{raw[:80]}`]"
+            return as_raw
         except ValueError:
             args = {}
     if not isinstance(args, dict):
