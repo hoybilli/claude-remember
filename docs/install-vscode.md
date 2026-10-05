@@ -10,7 +10,7 @@ Versions run: VS Code 1.140.0 with Copilot Chat 0.68.0, Copilot CLI 1.0.92-3 (Wi
 
 - Bash: Git for Windows on Windows ([windows.md](windows.md)); stock bash on macOS.
 - Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it).
-- `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). Without it nothing is injected in VS Code or the CLI; `.remember/logs/memory-<date>.log` says so.
+- `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). The SessionStart recap no longer needs it: Python builds the JSON envelope the Copilot hosts inject (**reasoned** from the code and pinned by `tests/test_session_start_copilot_stdout_vscode.py`, which hides `jq`; the live host runs predate this). Without a working Python nothing is injected; `.remember/logs/memory-<date>.log` says `session-start: copilot envelope failed, plain recap`.
 - Claude Code's `claude` CLI on `PATH`, signed in: saves with new content, and a daily consolidation, are `claude -p` calls billed to your Claude account, not to Copilot (billing: reasoned).
 - The `copilot` CLI, for desktop app installs.
 - On Windows each hook starts through a small PowerShell launcher (`-ExecutionPolicy Bypass` for that one process); the live Windows runs used an earlier form of it, and the shipped form has run only in tests ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
@@ -73,7 +73,7 @@ Keep A unless a summarizer call per turn costs more than you want. Use a whole n
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| The assistant shows no memory of earlier sessions | No `jq`; or the host was started from a terminal inside Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install `jq`; start the host from a terminal outside Claude Code |
+| The assistant shows no memory of earlier sessions | No working Python (the log says `copilot envelope failed`); or the host was started from a terminal inside Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install Python 3.9+; start the host from a terminal outside Claude Code |
 | VS Code on macOS shows nothing from the plugin; its log (run **Developer: Open Logs Folder**; the file is `agenthost.log`) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: VS Code cannot copy its `.git/` socket and the sync aborts (observed on macOS) | Register a copy without `.git/` (observed), or run `git config core.fsmonitor false` and `git fsmonitor--daemon stop` in the checkout (not tried); register under a new path |
 | `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows. If `bash.exe` is elsewhere, set the user environment variable `REMEMBER_BASH` to its full path (for example `D:\Git\bin\bash.exe`) and restart the host (reasoned) |
 | The CLI shows no recap | Another plugin's hook failed in the same batch; the CLI drops the batch's output (observed on Windows) | Fix the other plugin |

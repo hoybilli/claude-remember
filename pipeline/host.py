@@ -308,6 +308,40 @@ def detect_host(overrides: Mapping[str, str] | None = None) -> Host:
     return UNKNOWN
 
 
+def copilot_session() -> bool:
+    """Whether this process serves a VS Code Agents / Copilot session (issue:
+    vscode), by exactly the rule ``remember_session_id_resolve`` in
+    ``scripts/lib-session-id.sh`` applies -- so the shell hooks and the
+    Python side never disagree about the host.
+
+    True when ``REMEMBER_HOST_HINT`` is ``copilot`` -- every hook exports it:
+    session-start-hook.sh sets it from the session id's ``agent-host-*:/``
+    prefix alone; post-tool-hook.sh and session-end-hook.sh export the
+    resolver's full answer, which this rule reproduces either way. Otherwise
+    True when ``COPILOT_CLI`` or ``COPILOT_PLUGIN_ROOT`` is non-empty and no
+    signature variable of a host that ``REGISTRY`` lists before ``COPILOT``
+    is (Claude Code, Codex, Antigravity): the same first-match order
+    ``detect_host`` uses.
+
+    Deliberately not ``detect_host() is COPILOT``: that reads a value set
+    only when it is non-blank after ``strip()``, while the shell's
+    ``[ -n ]`` / ``[ -z ]`` count a whitespace-only value as set; and it has
+    no notion of the session-id prefix. Each variable is read by its literal
+    name (#898 round 10); tests/test_session_start_host_rule_vscode.py pins
+    the names against ``REGISTRY`` and the rule against the shell resolver.
+    """
+    if os.environ.get("REMEMBER_HOST_HINT", "") == "copilot":
+        return True
+    if (os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+            or os.environ.get("CODEX_SESSION_ID", "")
+            or os.environ.get("CODEX_THREAD_ID", "")
+            or os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "")):
+        return False
+    return bool(os.environ.get("COPILOT_CLI", "")
+                or os.environ.get("COPILOT_PLUGIN_ROOT", ""))
+
+
 def plugin_root(overrides: Mapping[str, str] | None = None) -> str | None:
     """The plugin install directory, under whichever name this host uses."""
     values = _environment_values() if overrides is None else overrides

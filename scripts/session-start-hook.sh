@@ -211,7 +211,6 @@ export REMEMBER_HOOK_CWD
 # is why this hook never reaches this line for that child; resolve-paths.sh
 # keeps its own copy of the same guard for every OTHER caller that sources it.
 REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
-source "$_HOOK_DIR/lib-session-id.sh"
 # Defer the Python candidate probe (#662): this foreground path only ever
 # needs $PYTHON through four call sites, all jq-less fallbacks (the config
 # merge, the config flatten, the per-key read, and _jq_fallback itself) --
@@ -284,10 +283,16 @@ source "$PLUGIN_ROOT/scripts/lib-memory-context.sh"
 _stdin_json_string_into CURRENT_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 # issue: vscode -- VS Code Agents prefixes the uuid (`agent-host-copilotcli:/`);
 # strip it before the allowlist below, which correctly rejects `:` and `/`.
-# The resolver sets globals instead of forking two $(...) (#511).
-remember_session_id_resolve "$CURRENT_SESSION_ID"
-CURRENT_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
-REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
+# Only the prefix half of scripts/lib-session-id.sh's resolver is inlined here
+# (the strip gives the same id as remember_session_id_resolve for every
+# input): this hook does not source that library, to stay inside the compiled
+# size budget (v0.40.0, HOOK_SCRIPT_MAX_BYTES). REMEMBER_HOST_HINT is
+# exported as "copilot" when the prefix was present, else empty; the rest of
+# the host rule -- the environment signatures -- is applied in Python, by
+# pipeline.host.copilot_session(), only when the recap is emitted below.
+export REMEMBER_HOST_HINT=""
+[[ "$CURRENT_SESSION_ID" == agent-host-*:/* ]] && REMEMBER_HOST_HINT=copilot
+CURRENT_SESSION_ID=${CURRENT_SESSION_ID#agent-host-*:/}
 # stdin is not more trustworthy than a basename. This is compared against
 # names taken off the transcript directory, and `..` would match nothing
 # useful while `/` would match across directories, so it faces the same guard
@@ -317,12 +322,10 @@ if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
 fi
 export REMEMBER_TRANSCRIPT_PATH
 # issue: vscode -- VS Code hands over a transcript_path that cannot exist on
-# Windows (a directory name containing a colon). Drop it on that host only, so
-# pipeline/haiku.py does not log a "vanished transcript" receipt on every save;
-# every other host keeps #477's receipt exactly as before.
-if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ -n "$REMEMBER_TRANSCRIPT_PATH" ] && [ ! -f "$REMEMBER_TRANSCRIPT_PATH" ]; then
-    REMEMBER_TRANSCRIPT_PATH=""
-fi
+# Windows (a directory name containing a colon). It is exported as-is: the
+# one reader that would log a "vanished transcript" receipt for it,
+# pipeline/haiku.py, skips that receipt on the Copilot host itself
+# (pipeline.host.copilot_session); every other host keeps #477's receipt.
 
 # ── Which KIND of SessionStart is this? (#339) ────────────────────────────
 # `source` is one of startup | resume | clear | compact | fork. It is read for
@@ -2387,6 +2390,44 @@ fi
 # common (CTX_OK) path.
 
 # ── Emit: promo via systemMessage, or the old plain-text shape unchanged ───
+# VS Code Agents / Copilot (issue: vscode). Observed on VS Code 1.139.1 /
+# Windows 11 (macOS/Linux reasoned, not run): a SessionStart hook's stdout
+# reaches the model only as JSON with a TOP-LEVEL `additionalContext`; the
+# Claude Code `hookSpecificOutput` wrapper and plain text did not. Caveat:
+# those three shapes came from three commands in one hook entry,
+# `hookSpecificOutput` first, so "unsupported" cannot be told from "a later
+# command's JSON won" -- the top-level shape is the one proven to inject.
+#
+# The trigger below is cheap and deliberately wider than the host rule: the
+# session id carried the agent-host prefix (REMEMBER_HOST_HINT, set above), or
+# a Copilot signature variable is non-empty. Claude Code, Codex and
+# Antigravity sessions without a Copilot variable never reach the fork. Past
+# the trigger, ONE Python call (pipeline/copilot_recap.py) applies the exact
+# rule -- the same as scripts/lib-session-id.sh's resolver -- and prints the
+# exact hint ("copilot" or nothing) into REMEMBER_HOST_HINT. On the Copilot
+# host it also:
+#   - recap buffered: rewrites the buffer file, in place, to the
+#     recap wrapped as {"additionalContext": ...} -- byte for byte what
+#     `jq -Rs` printed before (now also without jq, since Python builds it),
+#     so the plain `cat` below prints the envelope;
+#   - recap NOT buffered (a trace is running, or tmp/ is not writable): logs
+#     that the recap went out live as plain text, which this host does not
+#     inject.
+# On any other host it changes nothing, so the branches below run unchanged.
+# The helper lives in pipeline/, not in this file, to keep the compiled hook
+# inside v0.40.0's size budget. If it cannot run (no Python, or a non-zero
+# exit) the buffer still holds the plain recap (the helper puts it back if its
+# own write fails part way), so the recap goes out as plain text, and that is
+# logged. On the Copilot host -- and when the helper failed, as the host
+# is then unknown -- PROMO_MSG is cleared: promos are skipped there on purpose
+# (`systemMessage` was not probed), and with no promo shown no marker is
+# written, so nothing is burned.
+if [ -n "$REMEMBER_HOST_HINT$COPILOT_CLI$COPILOT_PLUGIN_ROOT" ] \
+    && ! REMEMBER_HOST_HINT=$(_remember_python && cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.copilot_recap "${_REMEMBER_CTX_OK:+$_REMEMBER_CTX_FILE}" 2>/dev/null); then
+    PROMO_MSG=""
+    log "hook" "session-start: copilot envelope failed, plain recap"
+fi
+[ -z "$REMEMBER_HOST_HINT" ] || PROMO_MSG=""
 if [ -n "$_REMEMBER_CTX_OK" ]; then
     # Restore the real fd before printing anything -- everything above this
     # point landed in the buffer file instead of the terminal.
@@ -2397,36 +2438,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # through, byte-for-byte -- the common case, and the one that must never
     # regress. `cat`, never `$(cat …)`, so a trailing blank line the old
     # direct-print path always produced is not silently trimmed here.
-    #
-    # VS Code Agents (REMEMBER_HOST_HINT=copilot) comes first. Observed on
-    # VS Code 1.139.1 / Windows 11 (macOS/Linux reasoned, not run): a
-    # SessionStart hook's stdout reaches the model only as JSON with a
-    # TOP-LEVEL `additionalContext`; the Claude Code `hookSpecificOutput`
-    # wrapper and plain text did not. Caveat: those three shapes came from
-    # three commands in one hook entry, `hookSpecificOutput` first, so
-    # "unsupported" cannot be told from "a later command's JSON won" -- the
-    # top-level shape is the one proven to inject. The buffer is the exact
-    # plain-text recap Claude Code gets, only wrapped. A jq failure falls back
-    # to the plain buffer, so the hook never costs the context it wraps.
-    # Promos are skipped on this host on purpose: `systemMessage` was not
-    # probed, and since no promo is shown no marker is written, so nothing is
-    # burned. Without jq the recap falls through to plain text, which this
-    # host does not inject -- logged, so that silence is diagnosable. So is a
-    # failed envelope. (Wording: no bare ` jq ` word in a log string -- the
-    # #601 lint in tests/test_path_resolution.py reads it as a hardcoded call.)
-    if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && ! command -v jq >/dev/null 2>&1; then
-        log "hook" "session-start: copilot host without jq, recap printed as plain text, which this host does not inject"
-    fi
-    if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && command -v jq >/dev/null 2>&1; then
-        _REMEMBER_HOST_JSON=$(_remember_run_jq -Rs '{additionalContext:.}' \
-            < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_HOST_JSON=""
-        if [ -n "$_REMEMBER_HOST_JSON" ]; then
-            printf '%s\n' "$_REMEMBER_HOST_JSON"
-        else
-            log "hook" "session-start: copilot envelope could not be built, recap printed as plain text, which this host does not inject"
-            cat "$_REMEMBER_CTX_FILE"
-        fi
-    elif [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
+    if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
         _REMEMBER_PROMO_JSON=$(_remember_run_jq -Rs --arg msg "$PROMO_MSG" \
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
@@ -2464,12 +2476,6 @@ else
     # removed; on this branch the buffer redirect never engaged, so it was
     # never created, but $_hook_stdin_file still needs its own remove.
     rm -f "$_hook_stdin_file" 2>/dev/null
-    # The recap already went out live, as plain text, which the Copilot host
-    # does not inject (a trace is running, or tmp/ is not writable): say so,
-    # or a traced VS Code session loses its recap without a trace.
-    if [ "${REMEMBER_HOST_HINT:-}" = copilot ]; then
-        log "hook" "session-start: copilot host, recap not buffered (trace on or tmp/ not writable), printed as plain text, which this host does not inject"
-    fi
 fi
 # _REMEMBER_CTX_OK empty: the buffer redirect never engaged, so every line
 # above already went straight to the real terminal as it always did -- there

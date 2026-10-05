@@ -13,6 +13,10 @@ for a fresh HOME, and says so when it does not.
 
 The envelope shape was observed on VS Code 1.139.1 / Windows 11 only;
 macOS/Linux VS Code is reasoned.
+
+The envelope is built by pipeline/copilot_recap.py (Python), called once from
+the hook when its cheap Copilot trigger fires, so it no longer needs jq; when
+that helper cannot run, the plain recap goes out and the hook logs it.
 """
 from __future__ import annotations
 
@@ -143,8 +147,10 @@ def test_promo_on_copilot_path_is_the_bare_envelope(tmp_path):
 
 # --- Plain-text fallbacks on the copilot host are logged --------------------
 
+# The jq-less fallback line the hook logged before Python built the envelope;
+# asserted absent now that the envelope no longer needs jq.
 _NO_JQ_LOG = "copilot host without jq,"
-_ENVELOPE_FAILED_LOG = "copilot envelope could not be built"
+_ENVELOPE_FAILED_LOG = "session-start: copilot envelope failed, plain recap"
 _UNBUFFERED_LOG = "copilot host, recap not buffered"
 
 
@@ -198,7 +204,10 @@ def _path_without_jq(tmp_path):
     return os.pathsep.join(kept)
 
 
-def test_copilot_without_jq_logs_why_nothing_is_injected(tmp_path):
+def test_copilot_without_jq_still_gets_the_envelope(tmp_path):
+    """Python builds the envelope, so a jq-less Copilot host now gets its
+    recap injected (the one behaviour change of the size-budget work; it
+    used to fall back to plain text and log _NO_JQ_LOG)."""
     path = _path_without_jq(tmp_path)
     # Positive control: jq is really hidden, and what the hook needs is not.
     # shutil.which applies PATHEXT on Windows, so the bare names work there too.
@@ -206,8 +215,11 @@ def test_copilot_without_jq_logs_why_nothing_is_injected(tmp_path):
     for tool in ("tr", "cat", "date"):
         assert shutil.which(tool, path=path), f"{tool} lost from the jq-less PATH"
     out = _run(tmp_path, UUID, {"COPILOT_CLI": "1", "PATH": path})
-    _assert_plain(out)
-    assert _NO_JQ_LOG in _logs(tmp_path)
+    _assert_envelope(out)
+    logs = _logs(tmp_path)
+    assert "session-start" in logs
+    for line in (_NO_JQ_LOG, _ENVELOPE_FAILED_LOG, _UNBUFFERED_LOG):
+        assert line not in logs
 
 
 def test_copilot_with_jq_does_not_log_any_fallback_line(tmp_path):
@@ -231,16 +243,96 @@ def _failing_jq_dir(tmp_path):
     return d
 
 
-def test_copilot_jq_failure_falls_back_to_plain_and_logs_it(tmp_path):
-    """The envelope's own jq call fails: the recap still goes out (plain), and
-    the log says why the host will not inject it."""
+def test_copilot_failing_jq_no_longer_matters(tmp_path):
+    """A jq that exits non-zero used to cost the envelope; Python builds it
+    now, so the recap is still injected and no fallback is logged."""
     path = os.pathsep.join([str(_failing_jq_dir(tmp_path)), os.environ.get("PATH", "")])
     out = _run(tmp_path, UUID, {"COPILOT_CLI": "1", "PATH": path,
                                 "REMEMBER_TOOLS_CACHE": "0"})
-    assert "PROBE-RECENT-LINE" in out and '"additionalContext"' not in out
+    _assert_envelope(out)
+    assert _ENVELOPE_FAILED_LOG not in _logs(tmp_path)
+
+
+# --- The Python helper cannot run: plain recap, logged ----------------------
+
+_PY_NAMES = ("python3", "python", "py")
+
+
+def _python_stub_dir(tmp_path, version_ok):
+    """A directory of `python3` / `python` / `py` stubs to put first on PATH.
+    Each appends its argv to calls.txt and exits 1, except that `-V` (the
+    hook's interpreter probe) exits 0 when VERSION_OK. Returns (dir, calls)."""
+    d = tmp_path / "python-stub"
+    d.mkdir()
+    calls = tmp_path / "calls.txt"
+    probe = "0" if version_ok else "1"
+    body = ("#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{calls.as_posix()}'\n"
+            "for a in \"$@\"; do\n"
+            f"    [ \"$a\" = -V ] && exit {probe}\n"
+            "done\n"
+            "exit 1\n")
+    for name in _PY_NAMES:
+        stub = d / name
+        stub.write_bytes(body.encode())
+        stub.chmod(0o755)
+    return d, calls
+
+
+def _calls(calls):
+    return calls.read_text(encoding="utf-8") if calls.exists() else ""
+
+
+def _stub_env(stub_dir, extra=None):
+    env = {"PATH": os.pathsep.join([str(stub_dir), os.environ.get("PATH", "")]),
+           "REMEMBER_TOOLS_CACHE": "0"}
+    env.update(extra or {})
+    return env
+
+
+def test_copilot_without_python_falls_back_to_plain_and_logs_it(tmp_path):
+    """No working interpreter (every candidate fails its `-V` probe): the
+    recap still goes out, plain, and the log says the envelope failed."""
+    stub_dir, calls = _python_stub_dir(tmp_path, version_ok=False)
+    out = _run(tmp_path, UUID, _stub_env(stub_dir, {"COPILOT_CLI": "1"}))
+    _assert_plain(out)
+    assert "-V" in _calls(calls)  # positive control: the stubs were what ran
+    assert "copilot_recap" not in _calls(calls)
+    assert _ENVELOPE_FAILED_LOG in _logs(tmp_path)
+
+
+def test_copilot_helper_failure_falls_back_to_plain_and_logs_it(tmp_path):
+    """The interpreter probes fine, but the helper itself exits non-zero."""
+    stub_dir, calls = _python_stub_dir(tmp_path, version_ok=True)
+    out = _run(tmp_path, UUID, _stub_env(stub_dir, {"COPILOT_CLI": "1"}))
+    _assert_plain(out)
+    assert "-m pipeline.copilot_recap" in _calls(calls)
+    assert _ENVELOPE_FAILED_LOG in _logs(tmp_path)
+
+
+def test_claude_code_path_never_calls_the_helper(tmp_path):
+    """Claude Code (no Copilot variable, no prefix): the trigger does not
+    fire, so no interpreter is probed or run at all -- the stubs, which record
+    every call, are never touched. Positive control: the helper-failure case
+    above, where the same stubs do record the helper call."""
+    stub_dir, calls = _python_stub_dir(tmp_path, version_ok=True)
+    out = _run(tmp_path, UUID, _stub_env(stub_dir))
+    _assert_plain(out)
+    assert _calls(calls) == ""
     logs = _logs(tmp_path)
-    assert _ENVELOPE_FAILED_LOG in logs
-    assert _NO_JQ_LOG not in logs
+    assert "session-start" in logs
+    assert _ENVELOPE_FAILED_LOG not in logs
+
+
+def test_promo_on_copilot_helper_failure_still_skips_the_promo(tmp_path):
+    """A failed helper leaves the host unknown, so the promo is skipped (no
+    `systemMessage`, no marker burned): the plain recap goes out."""
+    _claude_promo_or_skip(tmp_path)
+    stub_dir, _calls_file = _python_stub_dir(tmp_path, version_ok=True)
+    out = _run(tmp_path / "copilot", UUID, _stub_env(stub_dir, {"COPILOT_CLI": "1"}),
+               promos=True)
+    assert '"systemMessage"' not in out
+    _assert_plain(out)
 
 
 def test_copilot_unbuffered_recap_is_logged(tmp_path):

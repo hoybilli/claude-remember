@@ -266,7 +266,14 @@ def _choose_summarizer_provider() -> str:
         # function's contract ("a usable path or None") unchanged for every
         # other caller.
         raw = (os.environ.get("REMEMBER_TRANSCRIPT_PATH") or "").strip()
-        if raw:
+        # issue: vscode -- VS Code hands over a transcript_path that cannot
+        # exist on Windows (a directory name containing a colon), so on the
+        # Copilot host a missing file is the normal case, not #477's
+        # vanished transcript: no receipt there. Every other host keeps it.
+        # (session-start-hook.sh used to blank the variable on that host
+        # itself; the check moved here to keep the compiled hook inside
+        # v0.40.0's size budget.)
+        if raw and not _host.copilot_session():
             _warn(
                 f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "
                 "transcript that no longer exists (exported, then vanished "
