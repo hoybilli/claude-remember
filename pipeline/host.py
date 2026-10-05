@@ -281,6 +281,9 @@ def _environment_values() -> dict[str, str]:
         "CODEX_SESSION_ID": os.environ.get("CODEX_SESSION_ID", ""),
         "CODEX_THREAD_ID": os.environ.get("CODEX_THREAD_ID", ""),
         "ANTIGRAVITY_CONVERSATION_ID": os.environ.get("ANTIGRAVITY_CONVERSATION_ID", ""),
+        "COPILOT_CLI": os.environ.get("COPILOT_CLI", ""),
+        "COPILOT_PLUGIN_ROOT": os.environ.get("COPILOT_PLUGIN_ROOT", ""),
+        "COPILOT_PROJECT_DIR": os.environ.get("COPILOT_PROJECT_DIR", ""),
         "REMEMBER_TRANSCRIPT_PATH": os.environ.get("REMEMBER_TRANSCRIPT_PATH", ""),
     }
 
@@ -619,7 +622,7 @@ def transcript_path(overrides: Mapping[str, str] | None = None) -> str | None:
     NOT validated against containment or a session id (#424): this is an
     existence check only, and ``find_session()`` returns whatever this
     returns before its own traversal check ever runs. Callers that read
-    ``env`` from a process whose environment could hold a value THEY did not
+    ``overrides`` from a process whose environment could hold a value THEY did not
     set -- an inherited shell, an ambient dotfile -- must clear
     ``TRANSCRIPT_PATH_VAR`` before it reaches them, the way
     ``scripts/post-tool-hook.sh`` and ``scripts/user-prompt-hook.sh`` now do,
@@ -672,22 +675,28 @@ _COPILOT_UUID_RE = re.compile(
 )
 
 
-def copilot_session_state_dir(env: Mapping[str, str] | None = None) -> str:
+def copilot_session_state_dir(overrides: Mapping[str, str] | None = None) -> str:
     """``$COPILOT_HOME/session-state`` or ``~/.copilot/session-state``.
 
     ``HOME`` is honoured explicitly (test fixtures patch HOME; on Windows
     ``os.path.expanduser`` reads USERPROFILE instead), the same way
     ``pipeline.extract._session_dir`` does for Claude Code.
     """
-    env = os.environ if env is None else env
-    base = (env.get("COPILOT_HOME") or "").strip()
+    if overrides is None:
+        base = (os.environ.get("COPILOT_HOME") or "").strip()
+        home = os.environ.get("HOME") or ""
+    else:
+        base = (overrides.get("COPILOT_HOME") or "").strip()
+        home = overrides.get("HOME") or ""
     if not base:
-        home = env.get("HOME") or os.path.expanduser("~")
+        home = home or os.path.expanduser("~")
         base = home.rstrip("/\\") + "/.copilot"
     return base.rstrip("/\\") + "/session-state"
 
 
-def copilot_transcript_for(session_id: str, env: Mapping[str, str] | None = None) -> str | None:
+def copilot_transcript_for(
+    session_id: str, overrides: Mapping[str, str] | None = None
+) -> str | None:
     """The VS Code Agents / Copilot events file for a bare uuid, if it exists.
 
     Existence-keyed on purpose (issue: vscode): a Claude Code session never
@@ -700,6 +709,6 @@ def copilot_transcript_for(session_id: str, env: Mapping[str, str] | None = None
     if not session_id or not _COPILOT_UUID_RE.fullmatch(session_id):
         return None
     path = os.path.normpath(
-        os.path.join(copilot_session_state_dir(env), session_id, "events.jsonl")
+        os.path.join(copilot_session_state_dir(overrides), session_id, "events.jsonl")
     )
     return path if os.path.isfile(path) else None
