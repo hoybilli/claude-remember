@@ -565,15 +565,14 @@ def _powershell(args, env, payload: bytes = _PAYLOAD.encode("utf-8"), policy="By
                           env=env, timeout=120)
 
 
-def _run_launcher(root: Path, ps_value: str, env_extra=None, path_first_system32=True,
-                  policy="Bypass"):
-    return _powershell(["-Command", ps_value],
-                       _launcher_env(root, env_extra, path_first_system32), policy=policy)
-
-
-def _run_launcher_file(root: Path, script: str, env):
-    """The launcher alone, via `-File` (what the manifest's child shell runs)."""
-    return _powershell(_launcher_args(root, script, manifest=False), env)
+def _run_launcher(root: Path, script: str | None = None, env=None, *, command=None,
+                  manifest=False, policy="Bypass", payload: bytes = _PAYLOAD.encode("utf-8")):
+    """One launcher run. COMMAND is a raw `-Command` value (a manifest entry's
+    own `powershell` string, or a probe); otherwise SCRIPT runs through
+    `_launcher_args` (the manifest value, or the launcher alone via `-File`).
+    ENV defaults to `_launcher_env(root)`."""
+    args = ["-Command", command] if command is not None else _launcher_args(root, script, manifest)
+    return _powershell(args, _launcher_env(root) if env is None else env, payload, policy)
 
 
 @_needs_win_launcher
@@ -586,8 +585,8 @@ def test_powershell_launcher_reaches_script_with_backslash_plugin_root(tmp_path)
     root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
     for loc, hook in _iter_entries():
         result = _run_launcher(
-            root, hook["powershell"], {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")}
-        )
+            root, env=_launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")}),
+            command=hook["powershell"])
         assert result.returncode == 0, f"{loc}: {result.stderr!r}"
         assert "ünï – 日本" in result.stdout.decode("utf-8"), f"{loc}: payload mangled"
     ran = marker.read_text(encoding="utf-8").split()
@@ -601,9 +600,9 @@ def test_powershell_launcher_forwards_bash_exit_code(tmp_path):
     the positive control for the returncode == 0 assertions elsewhere: a
     failing stub is visible. Observed on Windows only."""
     root = _fake_plugin(tmp_path, {"exit3.sh": "cat >/dev/null\nexit 3\n"})
-    direct = _run_launcher_file(root, "exit3.sh", _launcher_env(root))
+    direct = _run_launcher(root, "exit3.sh")
     assert direct.returncode == 3, direct.stderr
-    via_manifest = _run_launcher(root, _PS_VALUE.format(name="exit3.sh"))
+    via_manifest = _run_launcher(root, "exit3.sh", manifest=True)
     assert via_manifest.returncode == 3, via_manifest.stderr
 
 
@@ -620,9 +619,8 @@ def test_manifest_values_run_under_restricted_execution_policy(tmp_path):
     root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
     for loc, hook in _iter_entries():
         result = _run_launcher(
-            root, hook["powershell"],
-            {"REMEMBER_TEST_OUT": str(out_dir).replace("\\", "/")}, policy="Restricted",
-        )
+            root, env=_launcher_env(root, {"REMEMBER_TEST_OUT": str(out_dir).replace("\\", "/")}),
+            command=hook["powershell"], policy="Restricted")
         assert result.returncode == 0, f"{loc}: {result.stderr!r}"
         name = _script_named_by(hook["command"])
         seen = (out_dir / f"{name}.stdin").read_bytes()
@@ -636,7 +634,7 @@ def test_restricted_policy_blocks_a_direct_script_call(tmp_path):
     """Positive control for the test above: the same simulated policy really
     does refuse a `& script.ps1` call, so passing above is not vacuous."""
     root = _fake_plugin(tmp_path, {"probe.sh": "cat >/dev/null\n"})
-    result = _run_launcher(root, r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh',
+    result = _run_launcher(root, command=r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh',
                            policy="Restricted")
     assert result.returncode != 0
     assert b"PSSecurityException" in result.stderr or b"disabled" in result.stderr
@@ -655,7 +653,7 @@ def test_launcher_with_empty_localappdata_still_exits_zero(tmp_path):
     root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
     env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")},
                         drop=("LOCALAPPDATA",))
-    result = _run_launcher_file(root, "probe.sh", env)
+    result = _run_launcher(root, "probe.sh", env)
     assert result.returncode == 0, result.stderr
     git_under_pf = any(
         os.path.isfile(os.path.join(os.environ.get(v, ""), "Git", "bin", "bash.exe"))
@@ -670,7 +668,7 @@ def test_launcher_falls_through_a_missing_remember_bash(tmp_path):
     root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub()})
     env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
                                "REMEMBER_BASH": str(tmp_path / "no-such" / "bash.exe")})
-    result = _run_launcher_file(root, "probe.sh", env)
+    result = _run_launcher(root, "probe.sh", env)
     assert result.returncode == 0, result.stderr
     assert marker.is_file(), result.stderr
 
@@ -689,7 +687,7 @@ def test_launcher_runs_the_script_beside_itself(tmp_path, root_var):
     (other / "scripts" / "probe.sh").write_bytes(
         ('#!/usr/bin/env bash\necho ran >> "%s"\ncat >/dev/null\n'
          % str(decoy).replace("\\", "/")).encode("utf-8"))
-    result = _powershell(_launcher_args(root, "probe.sh", manifest=False), env)
+    result = _run_launcher(root, "probe.sh", env)
     assert result.returncode == 0, result.stderr
     assert mine.is_file(), result.stderr
     assert not decoy.exists()
@@ -703,7 +701,7 @@ def test_launcher_error_exits_zero(tmp_path):
     bogus.parent.mkdir()
     bogus.write_text("not a program", encoding="utf-8")
     root = _fake_plugin(tmp_path, {"probe.sh": "cat >/dev/null\n"})
-    result = _run_launcher_file(root, "probe.sh", _launcher_env(root, {"REMEMBER_BASH": str(bogus)}))
+    result = _run_launcher(root, "probe.sh", _launcher_env(root, {"REMEMBER_BASH": str(bogus)}))
     assert result.returncode == 0, result.stderr
     assert b"claude-remember: launcher error" in result.stderr
 
@@ -720,7 +718,7 @@ def test_launcher_error_line_keeps_non_ascii_paths_as_utf8(tmp_path, manifest):
         bogus.write_text("not a program", encoding="utf-8")
         root = _fake_plugin(tmp_path / dirname, {"probe.sh": "cat >/dev/null\n"})
         env = _launcher_env(root, {"REMEMBER_BASH": str(bogus)})
-        return _powershell(_launcher_args(root, "probe.sh", manifest), env)
+        return _run_launcher(root, "probe.sh", env, manifest=manifest)
 
     plain = run("plain")
     assert plain.returncode == 0, plain.stderr
@@ -769,9 +767,8 @@ def _both_launcher_forms(root, script, env_extra):
     manifest form, each timed until the caller sees stdout and stderr close --
     which is what VS Code waits for."""
     env = _launcher_env(root, env_extra)
-    direct, direct_s = _timed(lambda: _run_launcher_file(root, script, env))
-    manifest, manifest_s = _timed(
-        lambda: _run_launcher(root, _PS_VALUE.format(name=script), env_extra))
+    direct, direct_s = _timed(lambda: _run_launcher(root, script, env))
+    manifest, manifest_s = _timed(lambda: _run_launcher(root, script, env, manifest=True))
     return [("-File", direct, direct_s), ("manifest", manifest, manifest_s)]
 
 
@@ -784,10 +781,10 @@ def test_launcher_does_not_wait_for_the_hooks_background_child(tmp_path):
     markers = [tmp_path / "bg-file.txt", tmp_path / "bg-manifest.txt"]
     root = _fake_plugin(tmp_path, {"bg.sh": _bg_stub(background=True)})
     env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(markers[0]).replace("\\", "/")})
-    direct, direct_s = _timed(lambda: _run_launcher_file(root, "bg.sh", env))
+    direct, direct_s = _timed(lambda: _run_launcher(root, "bg.sh", env))
     manifest, manifest_s = _timed(lambda: _run_launcher(
-        root, _PS_VALUE.format(name="bg.sh"),
-        {"REMEMBER_TEST_MARKER": str(markers[1]).replace("\\", "/")}))
+        root, "bg.sh", _launcher_env(root, {"REMEMBER_TEST_MARKER": str(markers[1]).replace("\\", "/")}),
+        manifest=True))
     for label, result, took, marker in (("-File", direct, direct_s, markers[0]),
                                         ("manifest", manifest, manifest_s, markers[1])):
         assert took < _RETURN_BOUND_S, f"{label}: launcher held the caller for {took:.1f}s"
@@ -854,10 +851,9 @@ def test_launcher_runs_the_hook_when_the_handle_step_fails(tmp_path):
     marker = tmp_path / "ran.txt"
     root = _fake_plugin(tmp_path, {"probe.sh": _marker_stub() + "exit 4\n"})
     result = _run_launcher(
-        root,
-        "Add-Type -TypeDefinition 'namespace ClaudeRemember { public static class Handles { } }'; "
-        r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh; exit $LASTEXITCODE',
-        {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")})
+        root, env=_launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")}),
+        command="Add-Type -TypeDefinition 'namespace ClaudeRemember { public static class Handles { } }'; "
+                r'& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" probe.sh; exit $LASTEXITCODE')
     assert marker.is_file(), result.stderr
     assert result.returncode == 4, result.stderr
     assert b"claude-remember: launcher: could not detach background work" in result.stderr
@@ -954,7 +950,7 @@ def test_remember_bash_pointing_at_a_directory_falls_through(tmp_path):
     a_dir.mkdir()
     env = _launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/"),
                                "REMEMBER_BASH": str(a_dir)})
-    result = _run_launcher_file(root, "probe.sh", env)
+    result = _run_launcher(root, "probe.sh", env)
     assert result.returncode == 0, result.stderr
     assert marker.is_file(), result.stderr
     assert b"launcher error" not in result.stderr
@@ -969,7 +965,7 @@ _STDIN_SEEN_STUB = 'cat > "$REMEMBER_TEST_OUT"\nexit 5\n'
 
 
 def _launcher_with_input(root, script, payload: bytes, env, manifest: bool):
-    return _powershell(_launcher_args(root, script, manifest), env, payload)
+    return _run_launcher(root, script, env, manifest=manifest, payload=payload)
 
 
 @_needs_win_launcher

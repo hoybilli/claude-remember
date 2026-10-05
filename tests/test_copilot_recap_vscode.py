@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import HOST_ENV, hook_logs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -65,9 +66,7 @@ def _old_outputs(recaps: list[bytes], tmp_path: Path) -> list[bytes]:
     assert r.returncode == 0, decode_bash_output(r.stderr)
     return [(tmp_path / "out" / name).read_bytes() for name in names]
 
-_HOST_ENV = ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
-             "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "COPILOT_CLI",
-             "COPILOT_PLUGIN_ROOT", "REMEMBER_HOST_HINT", "REMEMBER_DIR")
+_HOST_ENV = HOST_ENV + ("REMEMBER_DIR",)
 
 _NAMED = [
     b"",
@@ -152,7 +151,7 @@ def test_main_logs_an_unbuffered_recap(tmp_path, monkeypatch, capsys):
     _env(monkeypatch, REMEMBER_HOST_HINT="copilot", REMEMBER_DIR=str(tmp_path))
     assert copilot_recap.main([]) == 0
     assert capsys.readouterr().out == "copilot"
-    logs = "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "logs").glob("*.log"))
+    logs = hook_logs(tmp_path / "logs")
     assert f"[hook] {copilot_recap.UNBUFFERED_LOG}" in logs
 
 

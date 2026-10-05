@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pipeline import host as _host
 from pipeline.extract import find_session
 
-UUID = "0d9f3c2a-6b1e-4f7d-9a2b-3c4d5e6f7a8b"
+from ._vscode_helpers import UUID
 
 
 @pytest.fixture

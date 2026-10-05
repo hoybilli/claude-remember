@@ -15,8 +15,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .conftest import _COPILOT_HOST_ENV_VARS as _SCRUBBED
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-_SCRUBBED = ("COPILOT_CLI", "COPILOT_PLUGIN_ROOT", "REMEMBER_HOST_HINT")
 
 # Captured at import, before any fixture runs: what the pytest process was
 # started with.

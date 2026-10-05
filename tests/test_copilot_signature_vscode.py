@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -17,7 +16,6 @@ FIXTURES = Path(__file__).parent / "fixtures"
 ENV = FIXTURES / "vscode-env-vscode.txt"
 STDIN = FIXTURES / "vscode-hook-stdin-vscode.json"
 
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "SessionEnd")
 
 
@@ -73,6 +71,7 @@ def test_stdin_fixture_has_bare_uuid_session_id_and_cwd():
     assert set(_EVENTS) <= set(payloads)
     for ev in _EVENTS:
         obj = payloads[ev]
-        assert _UUID.fullmatch(obj["session_id"]), ev
+        # The shape the production lookup accepts (pipeline.host.copilot_transcript_for).
+        assert _host._COPILOT_UUID_RE.fullmatch(obj["session_id"]), ev
         assert obj["cwd"], ev
         assert "transcript_path" not in obj, ev

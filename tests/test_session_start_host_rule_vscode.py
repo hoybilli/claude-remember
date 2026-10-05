@@ -27,6 +27,7 @@ from unittest.mock import patch
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import HOST_ENV, UUID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "session-start-hook.sh"
@@ -37,12 +38,14 @@ sys.path.insert(0, str(REPO_ROOT))
 from pipeline import host as _host  # noqa: E402
 from pipeline.haiku import _choose_summarizer_provider  # noqa: E402
 
+# Written out, not read from REGISTRY: the comparison below enumerates these,
+# so a name dropped from the registry must still be exercised here to be
+# caught (test_shell_signature_names_are_the_registry_names pins the set).
 _SIGNATURES = ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "COPILOT_CLI",
                "COPILOT_PLUGIN_ROOT")
 
-_IDS = ("", ".", "..", "abc", "11111111-2222-4333-8444-555555555555",
-        "agent-host-copilotcli:/11111111-2222-4333-8444-555555555555",
+_IDS = ("", ".", "..", "abc", UUID, f"agent-host-copilotcli:/{UUID}",
         "agent-host-:/x", "agent-host-x:/", "agent-host-x:/../../x", "agent-host-a:/b:/c",
         "agent-host-x", "agent-host-x:", "xagent-host-y:/z", "-n", "!", "=",
         "agent-host-*:/q", "a:/b", "agent-host-x:\\y", "agent-host-x/:/y", "AGENT-HOST-x:/y")
@@ -151,9 +154,9 @@ _MISSING = str(FIXTURES / "does-not-exist-vscode.jsonl")
 
 
 def _clear(monkeypatch):
-    for var in _SIGNATURES + ("REMEMBER_HOST_HINT", "CODEX_HOME", "PLUGIN_ROOT",
-                              "CLAUDE_PLUGIN_ROOT", "REMEMBER_SUMMARIZER",
-                              "REMEMBER_SUMMARIZER_FALLBACK", "REMEMBER_TRANSCRIPT_PATH"):
+    for var in HOST_ENV + ("CODEX_HOME", "PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT",
+                           "REMEMBER_SUMMARIZER", "REMEMBER_SUMMARIZER_FALLBACK",
+                           "REMEMBER_TRANSCRIPT_PATH"):
         monkeypatch.delenv(var, raising=False)
 
 

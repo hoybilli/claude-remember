@@ -11,13 +11,12 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import UUID, created_outside, hook_logs, tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
-
-UUID = "11111111-2222-4333-8444-555555555555"
 
 
 def _layout(tmp_path, with_copilot: bool):
@@ -47,9 +46,7 @@ def _run(home, project, remember, session_id=f"agent-host-copilotcli:/{UUID}"):
     r = subprocess.run([BASH, HOOK.as_posix()], input=payload.encode(), env=env,
                        capture_output=True, timeout=120)
     assert r.returncode == 0, decode_bash_output(r.stderr)
-    logs = "\n".join(p.read_text(encoding="utf-8", errors="replace")
-                     for p in (remember / "logs").glob("*.log"))
-    return logs
+    return hook_logs(remember / "logs")
 
 
 def test_copilot_transcript_is_resolved(tmp_path):
@@ -68,10 +65,6 @@ def test_without_copilot_transcript_old_warning_still_fires(tmp_path):
     assert "no session dir for this project" in logs
 
 
-def _tree(root: Path) -> set[str]:
-    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
-
-
 def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
     """`agent-host-x:/../../x` strips to `../../x`, which the hook's own
     validator must empty before the Copilot lookup builds a path from it. A
@@ -84,12 +77,11 @@ def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
     decoy.mkdir()
     (decoy / "events.jsonl").write_text(
         '{"type":"user.message","data":{"content":"hi"}}\n', encoding="utf-8")
-    before = _tree(tmp_path)
+    before = tree(tmp_path)
     logs = _run(home, project, remember, session_id="agent-host-x:/../../x")
     assert "no session dir for this project" in logs
     assert "x/events.jsonl" not in logs.replace("\\", "/")
-    new = _tree(tmp_path) - before
-    outside = sorted(p for p in new if not p.startswith("proj/.remember/"))
+    outside = created_outside(tmp_path, before, ("proj/.remember/",))
     assert outside == [], outside
 
 

@@ -10,13 +10,12 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import HOST_ENV, UUID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "scripts" / "lib-session-id.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
-
-UUID = "11111111-2222-4333-8444-555555555555"
 
 # The exact validator every hook already applies, copied verbatim so the test
 # proves the two layers agree rather than re-implementing either.
@@ -33,15 +32,12 @@ from pipeline import host as _host  # noqa: E402
 _EARLIER_HOSTS = _host.REGISTRY[:_host.REGISTRY.index(_host.COPILOT)]
 _EARLIER_SIGNATURES = tuple(v for h in _EARLIER_HOSTS for v in h.signature_vars)
 
-# Signals the host hint reads. The suite itself runs inside a Claude Code
-# session, so these must be stripped from the inherited env and only the ones a
-# case names put back -- otherwise a case tests the developer's shell.
-_HOST_ENV = tuple(dict.fromkeys(
-    ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
-     "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "COPILOT_CLI",
-     "COPILOT_PLUGIN_ROOT", "COPILOT_HOME", "REMEMBER_HOST_HINT",
-     "REMEMBER_SESSION_ID_NORMALIZED", "REMEMBER_SESSION_ID_HINT")
-    + _EARLIER_SIGNATURES + _host.COPILOT.signature_vars))
+# Signals the host hint reads, and the resolver's own globals. The suite
+# itself runs inside a Claude Code session, so these must be stripped from the
+# inherited env and only the ones a case names put back -- otherwise a case
+# tests the developer's shell.
+_HOST_ENV = HOST_ENV + ("COPILOT_HOME", "REMEMBER_SESSION_ID_NORMALIZED",
+                        "REMEMBER_SESSION_ID_HINT")
 
 def _bash(body: str, *args: str, extra_env: dict | None = None) -> str:
     """Source the library, run `body` with `args` as $1.., return stdout. The
@@ -86,43 +82,21 @@ def test_other_colon_forms_are_left_for_the_validator():
     assert run("abc:def")[0] == ""
 
 
-def test_bare_uuid_with_copilot_cli_env_is_copilot():
-    assert run(UUID, {"COPILOT_CLI": "1"}) == (UUID, "copilot")
-
-
-def test_bare_uuid_with_copilot_plugin_root_only_is_copilot():
-    assert run(UUID, {"COPILOT_PLUGIN_ROOT": "/x"}) == (UUID, "copilot")
-
-
-def test_claude_code_entrypoint_beats_copilot_env():
-    """Mirrors pipeline.host.detect_host: Claude Code's signature wins."""
-    assert run(UUID, {"COPILOT_CLI": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}) == (UUID, "")
-
-
-def test_claude_code_session_id_beats_copilot_env():
-    assert run(UUID, {"COPILOT_CLI": "1", "CLAUDE_CODE_SESSION_ID": "abc"}) == (UUID, "")
-
-
-def test_codex_thread_id_beats_copilot_env():
-    """A Codex session whose env also carries COPILOT_CLI keeps its plain recap,
-    as pipeline.host.detect_host says codex (CODEX precedes COPILOT)."""
-    assert run(UUID, {"COPILOT_CLI": "1", "CODEX_THREAD_ID": "t-1"}) == (UUID, "")
-
-
-def test_codex_session_id_beats_copilot_env():
-    assert run(UUID, {"COPILOT_CLI": "1", "CODEX_SESSION_ID": "s-1"}) == (UUID, "")
-
-
-def test_antigravity_conversation_id_beats_copilot_env():
-    assert run(UUID, {"COPILOT_PLUGIN_ROOT": "/x",
-                      "ANTIGRAVITY_CONVERSATION_ID": "c-1"}) == (UUID, "")
+@pytest.mark.parametrize("env", [{"COPILOT_CLI": "1"}, {"COPILOT_PLUGIN_ROOT": "/x"}],
+                         ids=["copilot-cli", "copilot-plugin-root-only"])
+def test_bare_uuid_with_a_copilot_signature_is_copilot(env):
+    assert run(UUID, env) == (UUID, "copilot")
 
 
 @pytest.mark.parametrize("earlier_var", _EARLIER_SIGNATURES)
 @pytest.mark.parametrize("copilot_var", _host.COPILOT.signature_vars)
 def test_hint_agrees_with_detect_host_for_every_earlier_signature(earlier_var, copilot_var):
     """Registry-derived parity: whatever detect_host says for this env, the
-    shell hint says copilot exactly when detect_host says COPILOT."""
+    shell hint says copilot exactly when detect_host says COPILOT -- so a
+    Claude Code, Codex or Antigravity session whose env also carries a Copilot
+    signature keeps its own plain recap. Every earlier signature against
+    every Copilot one, with plain non-blank values (the two sides differ only
+    on whitespace-only values, which this does not use)."""
     env = {copilot_var: "1", earlier_var: "x"}
     assert _host.detect_host(env) is not _host.COPILOT
     assert run(UUID, env) == (UUID, "")

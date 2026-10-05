@@ -29,13 +29,12 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import UUID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "scripts" / "lib-session-id.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
-
-UUID = "11111111-2222-4333-8444-555555555555"
 
 # Records every `[ -f PATH ]` the library evaluates, then defers to the
 # builtin so the function's own result is unchanged.

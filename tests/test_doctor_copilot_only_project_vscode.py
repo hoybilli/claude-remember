@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import UUID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCTOR = REPO_ROOT / "scripts" / "doctor.sh"
@@ -42,7 +43,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402
 
-UUID = "11111111-2222-4333-8444-555555555555"
 VERDICT_144 = (
     "VERDICT: problem -- session dir slug does not match Claude Code's "
     "transcript directory (#144); restarting will not help"

@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import decode_bash_output, resolve_bash
+from ._vscode_helpers import UUID, created_outside, hook_logs, posix, tree
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASH = resolve_bash()
@@ -48,7 +49,6 @@ pytestmark = pytest.mark.skipif(
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
 
-UUID = "3f2b9c4e-7a1d-4e8b-9c0f-5d6e7f8a9b0c"
 # Key value for the immediate-path cases (they never sleep on it).
 WINDOW_S = 2
 # The burst case needs turn 2's token on disk before turn 1's sleeper wakes:
@@ -78,13 +78,6 @@ _STRIP_NAMES = ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR",
                 "_LIB_MEMORY_DIR_LOADED")
 
 
-def _posix(p) -> str:
-    """Forward slashes: the hook derives its own directory with
-    `${BASH_SOURCE[0]%/*}`, which only splits on `/` (see
-    tests/test_session_end_log_names_488.py::_posix_path)."""
-    return str(p).replace("\\", "/")
-
-
 def _write_lf(path: Path, text: str) -> None:
     path.write_bytes(text.encode("utf-8"))
 
@@ -107,7 +100,7 @@ class Sandbox:
                         ignore=shutil.ignore_patterns("__pycache__"))
         _write_lf(self.plugin / "scripts" / "save-session.sh",
                   "#!/bin/bash\n"
-                  f'printf \'%s\\n\' "$*" > "{_posix(self.records)}/save.$$"\n'
+                  f'printf \'%s\\n\' "$*" > "{posix(self.records)}/save.$$"\n'
                   "exit 0\n")
         cooldowns = {"save_seconds": 120}
         if key_value is not None:
@@ -118,12 +111,12 @@ class Sandbox:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(_STRIP_PREFIXES) and k not in _STRIP_NAMES}
         env.update({
-            "HOME": _posix(self.home),
+            "HOME": posix(self.home),
             "USERPROFILE": str(self.home),
-            "CLAUDE_PLUGIN_ROOT": _posix(self.plugin),
-            "CLAUDE_PROJECT_DIR": _posix(self.project),
+            "CLAUDE_PLUGIN_ROOT": posix(self.plugin),
+            "CLAUDE_PROJECT_DIR": posix(self.project),
             "REMEMBER_CONFIG_CACHE": "0",
-            "REMEMBER_TEST_COMPLETION_MARKER": _posix(self.tmp / "marker.log"),
+            "REMEMBER_TEST_COMPLETION_MARKER": posix(self.tmp / "marker.log"),
         })
         if copilot:
             env["COPILOT_CLI"] = "1"
@@ -134,11 +127,11 @@ class Sandbox:
         """Run the hook once. Returns (seconds the hook took, wall-clock
         time.time() right after it returned)."""
         body = {"hook_event_name": "SessionEnd", "reason": reason,
-                "cwd": _posix(self.project)}
+                "cwd": posix(self.project)}
         if session_id is not None:
             body["session_id"] = session_id
         started = time.monotonic()
-        r = subprocess.run([BASH, _posix(self.plugin / "scripts" / "session-end-hook.sh")],
+        r = subprocess.run([BASH, posix(self.plugin / "scripts" / "session-end-hook.sh")],
                            input=json.dumps(body).encode(), env=self.env(copilot),
                            capture_output=True, timeout=60, check=False)
         elapsed = time.monotonic() - started
@@ -150,15 +143,21 @@ class Sandbox:
         return sorted(self.records.glob("save.*"))
 
     def log_text(self) -> str:
-        return "\n".join(p.read_text(encoding="utf-8", errors="replace")
-                         for p in sorted((self.remember / "logs").glob("memory-*.log")))
+        return hook_logs(self.remember / "logs", "memory-*.log")
 
-    def launches(self) -> int:
+    def _marker_count(self, line: str) -> int:
         marker = self.tmp / "marker.log"
         if not marker.exists():
             return 0
-        return marker.read_text(encoding="utf-8", errors="replace").count(
-            "about to launch subshell")
+        return marker.read_text(encoding="utf-8", errors="replace").count(line)
+
+    def launches(self) -> int:
+        return self._marker_count("about to launch subshell")
+
+    def completions(self) -> int:
+        """Backgrounded saves that have finished: the subshell writes this
+        line after save-session.sh returns, and saves nothing after it."""
+        return self._marker_count("save-session.sh exited status=")
 
     def token_files(self) -> list[Path]:
         return sorted((self.remember / "tmp").glob("turn-end.*"))
@@ -279,9 +278,15 @@ def test_debounce_window_expires_then_saves_and_the_hook_did_not_wait(tmp_path):
         f"the debounce window is {EXPIRY_WINDOW_S}s")
     log = sb.log_text()
     assert log.count(DEFERRED) == 1, log
+    # Also the clamp case's paired control: a value inside the cap is used as
+    # given, with no clamp line (the deferral line proves the log was read).
+    assert f"{DEFERRED} {EXPIRY_WINDOW_S}s (cooldowns.{KEY})" in log, log
+    assert "clamped to 3600" not in log, log
     assert SUPERSEDED not in log, log
-    # Let any stray second call land before counting.
-    time.sleep(0.5)
+    # The one backgrounded subshell has finished, so no second call can still
+    # land. (An empty token dir would not prove it: the winner removes its
+    # token before it saves.)
+    sb.wait_for(lambda: sb.completions() >= 1, "the backgrounded save to finish")
     assert len(sb.saves()) == 1
     assert sb.saves()[0].read_text().split() == [UUID, "--force"]
     assert sb.token_files() == [], "the winning save must remove its token file"
@@ -372,7 +377,7 @@ def _stop_sleeper(sb: Sandbox) -> None:
         if pid.isdigit():
             break
         time.sleep(0.1)
-    hook = _posix(sb.plugin / "scripts" / "session-end-hook.sh")
+    hook = posix(sb.plugin / "scripts" / "session-end-hook.sh")
     subprocess.run([BASH, "-c", _STOP_SLEEPER, "stop", pid if pid.isdigit() else "", hook],
                    capture_output=True, timeout=30, check=False)
 
@@ -389,23 +394,10 @@ def test_debounce_above_an_hour_is_clamped_to_an_hour(tmp_path):
     finally:
         _stop_sleeper(sb)
 
-
-def test_debounce_at_or_below_an_hour_is_not_clamped(tmp_path):
-    """Paired control: a value inside the cap is used as given, with no
-    clamp line (the deferral line proves the log was read)."""
-    sb = Sandbox(tmp_path, key_value=EXPIRY_WINDOW_S)
-    sb.run_hook(copilot=True)
-    sb.wait_for(lambda: len(sb.saves()) >= 1, "the deferred save to run")
-    log = sb.log_text()
-    assert f"{DEFERRED} {EXPIRY_WINDOW_S}s (cooldowns.{KEY})" in log, log
-    assert "clamped to 3600" not in log, log
+# Its paired control (a value inside the cap, not clamped) is case 2 above.
 
 
 # --- The validator still runs after the prefix strip (end to end) ----------
-
-def _tree(root: Path) -> set[str]:
-    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
-
 
 def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
     """`agent-host-x:/../../x` strips to `../../x`, which the hook's own
@@ -413,14 +405,12 @@ def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
     without an id (not debounced: nothing safe to key a token on), and
     writes nothing outside the sandbox store."""
     sb = Sandbox(tmp_path, key_value=WINDOW_S)
-    before = _tree(tmp_path)
+    before = tree(tmp_path)
     sb.run_hook(copilot=True, session_id="agent-host-x:/../../x")
     sb.assert_immediate_single_save()
     assert "session=unresolved" in sb.log_text()
     assert sb.saves()[0].read_text().split() == ["--force"]
-    new = _tree(tmp_path) - before
-    allowed = ("project/.remember/", "saves/", "marker.log")
-    outside = sorted(p for p in new if not p.startswith(allowed))
+    outside = created_outside(tmp_path, before, ("project/.remember/", "saves/", "marker.log"))
     assert outside == [], outside
 
 
