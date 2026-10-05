@@ -483,6 +483,19 @@ SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
+# issue: vscode -- VS Code Agents / Copilot sends no transcript_path, and keeps
+# its transcript under ~/.copilot/session-state/<uuid>/, never under Claude
+# Code's projects dir. Found by the stdin uuid, it then takes the
+# STDIN_TRANSCRIPT_PATH branches below (LATEST_JSONL, and trust in the id). Set
+# only AFTER the REMEMBER_TRANSCRIPT_PATH export above, deliberately: exporting
+# it would switch on pipeline/haiku.py's Copilot-envelope receipt. The `_into`
+# form sets a global instead of forking a $(...) (#511), and refuses an empty
+# id itself.
+[ -z "$STDIN_TRANSCRIPT_PATH" ] && remember_copilot_transcript_into "$STDIN_SESSION_ID" && {
+    STDIN_TRANSCRIPT_PATH=$REMEMBER_COPILOT_TRANSCRIPT
+    log "hook" "post-tool: copilot transcript $STDIN_TRANSCRIPT_PATH"
+}
+
 # --- Count JSONL lines in the current session ---
 # A slug that does not match the directory Claude Code actually created leaves
 # nothing to read here, and the whole pipeline no-ops for the life of the
@@ -517,17 +530,8 @@ NOTICE_TTL=3600
 # stdin did not offer one -- an older CLI, a test harness, a host this
 # module has not been taught yet -- which is exactly the population the
 # existing "no session dir" warning below was already written for.
-COPILOT_TRANSCRIPT=""
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
-elif remember_copilot_transcript_into "$STDIN_SESSION_ID"; then
-    # issue: vscode -- VS Code Agents / Copilot keeps its transcript under
-    # ~/.copilot/session-state/<uuid>/, never under Claude Code's projects dir.
-    # The `_into` form sets a global instead of forking a $(...) (#511), and
-    # refuses an empty id itself.
-    COPILOT_TRANSCRIPT="$REMEMBER_COPILOT_TRANSCRIPT"
-    LATEST_JSONL="$COPILOT_TRANSCRIPT"
-    log "hook" "post-tool: copilot transcript $COPILOT_TRANSCRIPT"
 else
     LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
 fi
@@ -603,9 +607,6 @@ if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # and log a "falling back to newest" line that is not a fallback, just
     # noise on every Codex tool call.
     [ -n "$STDIN_SESSION_ID" ] && STDIN_SESSION_ID_TRUSTED=true
-elif [ -n "$COPILOT_TRANSCRIPT" ]; then
-    # issue: vscode -- resolved from ~/.copilot/session-state/<uuid>/ above.
-    STDIN_SESSION_ID_TRUSTED=true
 elif [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
     STDIN_SESSION_ID_TRUSTED=true

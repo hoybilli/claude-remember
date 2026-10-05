@@ -247,12 +247,11 @@ if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
 fi
 export REMEMBER_TRANSCRIPT_PATH
 # issue: vscode -- VS Code hands over a transcript_path that cannot exist on
-# Windows (a directory name containing a colon). Drop it on that host only, so
-# pipeline/haiku.py does not log a "vanished transcript" receipt on every save;
-# every other host keeps #477's receipt exactly as before.
-if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ -n "$REMEMBER_TRANSCRIPT_PATH" ] && [ ! -f "$REMEMBER_TRANSCRIPT_PATH" ]; then
-    REMEMBER_TRANSCRIPT_PATH=""
-fi
+# Windows (a directory name containing a colon). It is exported as-is, as the
+# SessionStart hook does: pipeline/haiku.py skips the "vanished transcript"
+# receipt on the Copilot host itself (pipeline.host.copilot_session, true
+# whenever REMEMBER_HOST_HINT=copilot, exported above), and
+# pipeline.host.transcript_path() reads a missing file as unset.
 
 # ── The cwd the host handed us (#411) ─────────────────────────────────────
 # Same field, same reasoning as the SessionStart hook's identical block:

@@ -96,30 +96,34 @@ remember_session_id_resolve() {
 # holds even where `[` is shadowed (tests/test_post_tool_copilot_transcript_
 # vscode.py shadows it to prove the guard alone refuses).
 #
-# The base is COPILOT_HOME when it is non-empty, else $HOME/.copilot -- an
-# empty COPILOT_HOME falls back, as the `${COPILOT_HOME:-...}` default it
-# replaces did (tests/test_copilot_home_fallback_vscode.py).
+# The directory is remember_copilot_state_dir_into's, below.
 remember_copilot_transcript_into() {
     REMEMBER_COPILOT_TRANSCRIPT=""
     if [[ -z "${1#.}" ]] || [[ -z "${1#..}" ]] || [[ "$1" == */* ]] \
         || [[ "$1" == *\\* ]] || [[ "$1" == *:* ]]; then
         return 1
     fi
-    local _rc_base _rc_path
-    if [ -n "${COPILOT_HOME:-}" ]; then
-        _rc_base=$COPILOT_HOME
-    else
-        _rc_base="${HOME:-}/.copilot"
-    fi
-    _rc_path="${_rc_base%/}/session-state/$1/events.jsonl"
+    remember_copilot_state_dir_into
+    local _rc_path="$REMEMBER_COPILOT_STATE_DIR/$1/events.jsonl"
     [ -f "$_rc_path" ] || return 1
     REMEMBER_COPILOT_TRANSCRIPT="$_rc_path"
     return 0
 }
 
-# remember_copilot_transcript_for UUID -> prints the Copilot events file if it
-# exists, else nothing (status 1).
-remember_copilot_transcript_for() {
-    remember_copilot_transcript_into "$1" || return 1
-    printf '%s' "$REMEMBER_COPILOT_TRANSCRIPT"
+# remember_copilot_state_dir_into -> sets REMEMBER_COPILOT_STATE_DIR to
+# <base>/session-state. Always returns 0. No command substitution.
+#
+# The base is COPILOT_HOME when it is non-empty, else $HOME/.copilot -- an
+# empty COPILOT_HOME falls back, as the `${COPILOT_HOME:-...}` default it
+# replaces did (tests/test_copilot_home_fallback_vscode.py) -- with one
+# trailing '/' dropped. doctor.sh prints this directory and resolves the last
+# save's transcript under it, so doctor and the hooks agree on where it is.
+remember_copilot_state_dir_into() {
+    if [ -n "${COPILOT_HOME:-}" ]; then
+        REMEMBER_COPILOT_STATE_DIR=$COPILOT_HOME
+    else
+        REMEMBER_COPILOT_STATE_DIR="${HOME:-}/.copilot"
+    fi
+    REMEMBER_COPILOT_STATE_DIR="${REMEMBER_COPILOT_STATE_DIR%/}/session-state"
+    return 0
 }

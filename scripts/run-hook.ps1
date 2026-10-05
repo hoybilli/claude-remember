@@ -55,10 +55,8 @@ try {
         exit 0
     }
 
-    $root = $env:CLAUDE_PLUGIN_ROOT
-    if (-not $root) { $root = $env:COPILOT_PLUGIN_ROOT }
-    if (-not $root) { $root = Split-Path -Parent $PSScriptRoot }
-    $target = (Join-Path (Join-Path $root 'scripts') $Script).Replace('\', '/')
+    # The hooks sit beside this launcher, in <plugin root>/scripts.
+    $target = (Join-Path $PSScriptRoot $Script).Replace('\', '/')
 
     # stdin is not read here: bash inherits this process's stdin handle and
     # reads the payload itself, so the bytes arrive exactly as the caller wrote

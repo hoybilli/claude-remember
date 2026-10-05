@@ -676,6 +676,26 @@ def test_launcher_falls_through_a_missing_remember_bash(tmp_path):
 
 
 @_needs_win_launcher
+@pytest.mark.parametrize("root_var", ["CLAUDE_PLUGIN_ROOT", "COPILOT_PLUGIN_ROOT"])
+def test_launcher_runs_the_script_beside_itself(tmp_path, root_var):
+    """The hook comes from the launcher's own directory, not from a root
+    variable naming another plugin copy. The decoy copy's marker staying
+    absent is paired with the launcher's own copy's marker appearing."""
+    mine, decoy = tmp_path / "mine.txt", tmp_path / "decoy.txt"
+    root = _fake_plugin(tmp_path / "a", {"probe.sh": _marker_stub()})
+    other = _fake_plugin(tmp_path / "b", {"probe.sh": _marker_stub()})
+    env = _launcher_env(None, {root_var: str(other),
+                               "REMEMBER_TEST_MARKER": str(mine).replace("\\", "/")})
+    (other / "scripts" / "probe.sh").write_bytes(
+        ('#!/usr/bin/env bash\necho ran >> "%s"\ncat >/dev/null\n'
+         % str(decoy).replace("\\", "/")).encode("utf-8"))
+    result = _powershell(_launcher_args(root, "probe.sh", manifest=False), env)
+    assert result.returncode == 0, result.stderr
+    assert mine.is_file(), result.stderr
+    assert not decoy.exists()
+
+
+@_needs_win_launcher
 def test_launcher_error_exits_zero(tmp_path):
     """A terminating error inside the launcher (here: the bash it picked is not
     an executable) is reported on stderr and exits 0, never non-zero."""

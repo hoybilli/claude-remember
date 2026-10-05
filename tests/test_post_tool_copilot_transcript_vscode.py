@@ -93,23 +93,14 @@ def test_traversal_after_the_prefix_is_rejected_by_the_hook(tmp_path):
     assert outside == [], outside
 
 
-# Two entry points share one lookup: the print form (run inside $(...)) and the
-# no-fork `_into` form post-tool-hook.sh uses, which sets
-# REMEMBER_COPILOT_TRANSCRIPT in the caller's shell and returns the same status
-# (issue: vscode, #511). Every lib case below runs against both.
-_LOOKUP = {
-    "print": 'out=$(remember_copilot_transcript_for "$2"); rc=$?',
-    "into": 'REMEMBER_COPILOT_TRANSCRIPT=stale; '
-            'remember_copilot_transcript_into "$2"; rc=$?; out=$REMEMBER_COPILOT_TRANSCRIPT',
-}
+# The no-fork lookup post-tool-hook.sh and doctor.sh use: it sets
+# REMEMBER_COPILOT_TRANSCRIPT in the caller's shell and returns its status
+# (issue: vscode, #511). The stale value proves a miss clears it.
+_LOOKUP = ('REMEMBER_COPILOT_TRANSCRIPT=stale; '
+           'remember_copilot_transcript_into "$2"; rc=$?; out=$REMEMBER_COPILOT_TRANSCRIPT')
 
 
-@pytest.fixture(params=sorted(_LOOKUP))
-def lookup(request):
-    return request.param
-
-
-def _lib_call(tmp_path, arg, home=None, any_file_exists=False, lookup="print"):
+def _lib_call(tmp_path, arg, home=None, any_file_exists=False):
     home = home or (tmp_path / "home")
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
     env.pop("COPILOT_HOME", None)
@@ -118,7 +109,7 @@ def _lib_call(tmp_path, arg, home=None, any_file_exists=False, lookup="print"):
     # any_file_exists shadows `[` so every -f test succeeds: only the id guard can
     # refuse then (a dir named "a\b" cannot be created on Windows filesystems).
     shadow = '[() { return 0; }; ' if any_file_exists else ''
-    code = 'source "$1"; ' + shadow + _LOOKUP[lookup] + '; printf "%s|%s" "$rc" "$out"'
+    code = 'source "$1"; ' + shadow + _LOOKUP + '; printf "%s|%s" "$rc" "$out"'
     r = subprocess.run([BASH, "-c", code, "x", lib, arg], env=env, capture_output=True, timeout=60)
     rc, _, out = decode_bash_output(r.stdout).partition("|")
     return int(rc), out
@@ -127,15 +118,15 @@ def _lib_call(tmp_path, arg, home=None, any_file_exists=False, lookup="print"):
 HOSTILE = ["", ".", "..", "../x", "a/b", "a" + chr(92) + "b", ".." + chr(92) + ".." + chr(92) + "x", "a:b"]
 
 
-def test_copilot_transcript_for_positive_control(tmp_path, lookup):
+def test_copilot_transcript_for_positive_control(tmp_path):
     home, _project, _remember = _layout(tmp_path, with_copilot=True)
-    rc, out = _lib_call(tmp_path, UUID, home, lookup=lookup)
+    rc, out = _lib_call(tmp_path, UUID, home)
     assert rc == 0
     assert out.replace(chr(92), "/").endswith(f"session-state/{UUID}/events.jsonl")
 
 
 @pytest.mark.parametrize("hostile", HOSTILE)
-def test_copilot_transcript_for_refuses_hostile_ids(tmp_path, hostile, lookup):
+def test_copilot_transcript_for_refuses_hostile_ids(tmp_path, hostile):
     home, _project, _remember = _layout(tmp_path, with_copilot=True)
     # Decoys so a missing guard would resolve a real file rather than fail vacuously.
     ss = home / ".copilot" / "session-state"
@@ -144,32 +135,32 @@ def test_copilot_transcript_for_refuses_hostile_ids(tmp_path, hostile, lookup):
     (ss.parent / "x" / "events.jsonl").write_text("{}", encoding="utf-8")  # "../x" target
     (ss / "a").mkdir()
     (ss / "a" / "events.jsonl").write_text("{}", encoding="utf-8")  # "a/b" neighbour
-    rc, out = _lib_call(tmp_path, hostile, home, lookup=lookup)
+    rc, out = _lib_call(tmp_path, hostile, home)
     assert rc != 0
     assert out == ""
 
 
 @pytest.mark.parametrize("hostile", HOSTILE)
-def test_copilot_transcript_for_guard_refuses_even_if_file_exists(tmp_path, hostile, lookup):
+def test_copilot_transcript_for_guard_refuses_even_if_file_exists(tmp_path, hostile):
     """Non-vacuous: with `[` shadowed to always succeed, the case guard alone
     must reject the id (a mutated guard makes this fail)."""
-    rc, out = _lib_call(tmp_path, hostile, any_file_exists=True, lookup=lookup)
+    rc, out = _lib_call(tmp_path, hostile, any_file_exists=True)
     assert rc != 0
     assert out == ""
 
 
-def test_shadowed_test_builtin_lets_a_plain_id_through(tmp_path, lookup):
+def test_shadowed_test_builtin_lets_a_plain_id_through(tmp_path):
     """Positive control for the shadowed-`[` negatives."""
-    rc, out = _lib_call(tmp_path, UUID, any_file_exists=True, lookup=lookup)
+    rc, out = _lib_call(tmp_path, UUID, any_file_exists=True)
     assert rc == 0 and UUID in out
 
 
 def test_into_clears_a_stale_value_when_absent(tmp_path):
-    """The `_into` form empties the global on a miss (the hook keeps no
-    previous call's path), while returning non-zero like the print form."""
-    rc, out = _lib_call(tmp_path, UUID, lookup="into")  # no session-state at all
+    """The lookup empties the global on a miss (the hook keeps no previous
+    call's path), and returns non-zero."""
+    rc, out = _lib_call(tmp_path, UUID)  # no session-state at all
     assert rc != 0 and out == ""
     # positive control: same call with the file present fills it
     home, _project, _remember = _layout(tmp_path, with_copilot=True)
-    rc, out = _lib_call(tmp_path, UUID, home, lookup="into")
+    rc, out = _lib_call(tmp_path, UUID, home)
     assert rc == 0 and out.endswith("events.jsonl")

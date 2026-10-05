@@ -198,9 +198,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
     ("scripts/post-tool-hook.sh", 443): _CASE,
-    ("scripts/post-tool-hook.sh", 649): _CASE,
-    ("scripts/post-tool-hook.sh", 692): _CASE,
-    ("scripts/post-tool-hook.sh", 748): _CASE,
+    ("scripts/post-tool-hook.sh", 650): _CASE,
+    ("scripts/post-tool-hook.sh", 693): _CASE,
+    ("scripts/post-tool-hook.sh", 749): _CASE,
     ("scripts/session-end-hook.sh", 219): _CASE,
     ("scripts/session-end-hook.sh", 227): _CASE,
     ("scripts/session-start-hook.sh", 301): _CASE,

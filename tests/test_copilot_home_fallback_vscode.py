@@ -8,12 +8,13 @@ the two forms must agree on: COPILOT_HOME set, COPILOT_HOME set but EMPTY (the
 `:-` form falls back, so the if/else must test `-n`, not "is set"),
 COPILOT_HOME unset with HOME set, and both unset.
 
-The library exposes no single point for the directory: it lives in a local
-of `remember_copilot_transcript_into`, which consumes it only as the path it
-probes with `[ -f ... ]`. So the observable output is that probe: the test
-shadows `[` with a shell function that records the `-f` operand and then runs
-the builtin unchanged. A real-file case below is the positive control that
-the recorded probe is the path the function actually resolves and returns.
+The directory is `remember_copilot_state_dir_into`'s, and the observable
+output that matters is what `remember_copilot_transcript_into` does with it:
+the path it probes with `[ -f ... ]`. So the test shadows `[` with a shell
+function that records the `-f` operand and then runs the builtin unchanged. A
+real-file case below is the positive control that the recorded probe is the
+path the function actually resolves and returns. doctor.sh resolves through
+the same helper; one doctor run pins the empty-COPILOT_HOME fallback there.
 
 The environment is set inside the bash script, not passed from Python: on
 Windows the MSYS runtime fills in HOME for a process started without one, so
@@ -90,3 +91,27 @@ def test_probe_is_the_path_the_function_returns(tmp_path):
     lines = decode_bash_output(r.stdout).splitlines()
     want = f"{cp.as_posix()}/session-state/{UUID}/events.jsonl"
     assert lines == [f"probe={want}", "rc=0", f"out={want}"]
+
+
+def test_doctor_falls_back_to_home_on_an_empty_copilot_home(tmp_path):
+    """doctor.sh, COPILOT_HOME set but empty: the session-state dir it prints
+    and the last save's transcript it finds are under HOME/.copilot, as the
+    hooks' lookup gives. Positive control: the same run with the transcript
+    under HOME/.copilot finds it (the Copilot line is printed), so the empty
+    value did not simply disable the lookup."""
+    from .test_doctor_copilot_only_project_vscode import (
+        NEW_OK_TAIL, _new_ok_lines, _project, _run, _verdict)
+    home, project, remember, _ = _project(tmp_path, claude_dir=False, copilot="home")
+    out = _run(home, project, remember, {"COPILOT_HOME": ""})
+    # Git Bash rewrites HOME to its own /tmp/... spelling, so the path is
+    # matched from the sandbox directory down.
+    state = f"/{tmp_path.name}/home/.copilot/session-state"
+    dir_lines = [l for l in out.replace(chr(92), "/").splitlines()
+                 if l.startswith("OK   copilot session-state dir present: ")]
+    assert len(dir_lines) == 1, out
+    assert dir_lines[0].endswith(
+        f"{state} (VS Code Agents transcripts resolve from here -- issue: vscode)"), out
+    lines = _new_ok_lines(out)
+    assert len(lines) == 1 and lines[0].endswith(NEW_OK_TAIL), out
+    assert f"{state}/{UUID}/events.jsonl" in lines[0].replace(chr(92), "/"), out
+    assert _verdict(out).startswith("VERDICT: capture is working"), out

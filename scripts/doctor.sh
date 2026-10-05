@@ -355,16 +355,13 @@ else
     echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
-# COPILOT_HOME when non-empty, else $HOME/.copilot -- the same base
-# lib-session-id.sh resolves (an explicit if/else: v0.40.0's release-tree
-# checker refuses a nested default expansion). Inline, because the library is
-# only sourced further down, and only conditionally.
-if [ -n "${COPILOT_HOME:-}" ]; then
-    _DOCTOR_COPILOT_DIR="$COPILOT_HOME/session-state"
-else
-    _DOCTOR_COPILOT_DIR="${HOME:-}/.copilot/session-state"
+# issue: vscode -- the Copilot session-state dir, resolved by the same library
+# the hooks use (sourced once, here; the last-save check further down uses it
+# too). A missing library skips both Copilot lines -- never an abort.
+if source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null; then
+    remember_copilot_state_dir_into
+    [ -d "$REMEMBER_COPILOT_STATE_DIR" ] && echo "OK   copilot session-state dir present: $REMEMBER_COPILOT_STATE_DIR (VS Code Agents transcripts resolve from here -- issue: vscode)"
 fi
-[ -d "$_DOCTOR_COPILOT_DIR" ] && echo "OK   copilot session-state dir present: $_DOCTOR_COPILOT_DIR (VS Code Agents transcripts resolve from here -- issue: vscode)"
 
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
@@ -761,18 +758,20 @@ fi
 # <COPILOT_HOME or ~/.copilot>/session-state/<uuid>/events.jsonl -- so without
 # this the verdict ladder below read a healthy project with real saves as a
 # #144 slug mismatch. Resolved with the same lookup the hooks use
-# (lib-session-id.sh), against the session id last-save.json recorded. Every
-# failure here (no jq above, so no id; the library missing) leaves the variable
-# empty, which is exactly the pre-existing behaviour -- never an abort.
+# (lib-session-id.sh, sourced in the Paths section), against the session id
+# last-save.json recorded. Every failure here (no jq above, so no id; the
+# library missing) leaves the variable empty, which is exactly the
+# pre-existing behaviour -- never an abort.
 _COPILOT_LAST_SAVE_TRANSCRIPT=""
-if [ -n "${_LS_SESSION:-}" ] && source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null; then
-    # Prints nothing when the file is absent or the id is refused (its own
-    # allowlist rejects '/', '\', ':', '.' and '..'); the scrub is the same
-    # #727 guard the .session read above applies to the value printed on
-    # the line below, which commands/doctor.md relays verbatim. (Other env
-    # paths, the Paths section's session-state line included, print unscrubbed,
-    # as elsewhere in this file.)
-    _COPILOT_LAST_SAVE_TRANSCRIPT=$(remember_copilot_transcript_for "$_LS_SESSION" 2>/dev/null | tr -d '[:cntrl:]')
+if [ -n "${_LS_SESSION:-}" ] && command -v remember_copilot_transcript_into >/dev/null 2>&1 \
+    && remember_copilot_transcript_into "$_LS_SESSION"; then
+    # A miss (file absent, or the id refused: its own allowlist rejects '/',
+    # '\', ':', '.' and '..') leaves the variable empty. The scrub is the same
+    # #727 guard the .session read above applies to the value printed on the
+    # line below, which commands/doctor.md relays verbatim. (Other env paths,
+    # the Paths section's session-state line included, print unscrubbed, as
+    # elsewhere in this file.)
+    _COPILOT_LAST_SAVE_TRANSCRIPT=${REMEMBER_COPILOT_TRANSCRIPT//[[:cntrl:]]/}
 fi
 if [ -n "$_COPILOT_LAST_SAVE_TRANSCRIPT" ]; then
     echo "OK   last save came from a VS Code Agents / Copilot session ($_COPILOT_LAST_SAVE_TRANSCRIPT); Claude Code's transcript dir is not expected (issue: vscode)"
