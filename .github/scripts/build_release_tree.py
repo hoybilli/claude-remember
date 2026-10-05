@@ -12,10 +12,11 @@ everything; this script produces the tree a `release` branch carries:
    edit cannot leak into a release.
 2. The config's deny-list is dropped. Deny, not allow: a path forgotten here ships
    and is caught loudly by check_release_tree.py; a path forgotten in an allow-list
-   would vanish from every user's install with no error anywhere.
-3. CHANGELOG.md is cut to its latest RELEASED section (an `[Unreleased]` heading is
-   skipped even when it has entries), its link definition, and a link to the full
-   file on the default branch.
+   would vanish from every user's install with no error anywhere. CHANGELOG.md is on
+   that deny-list: only README and LICENSE are required by the directory (#898).
+3. `release_readme`, if configured, swaps its own content in for README.md -- a
+   short release-only README with no `$VAR`/`${...}` and no network command names,
+   while the full README with every disclosure detail stays on the default branch.
 4. Relative links and images in every shipped `.md` file that point at a path the
    deny-list removed are rewritten to absolute URLs on the default branch:
    raw.githubusercontent.com for images, github.com/.../blob for everything else.
@@ -35,6 +36,7 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -44,6 +46,13 @@ from urllib.parse import quote, unquote
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from check_release_tree import gitattributes_offences
+from compile_hooks import (
+    HOOK_SCRIPT_NAMES,
+    InlineError,
+    compile_hook,
+    strip_whole_line_comments,
+)
+from strip_python import StripError, strip_python
 
 DEFAULT_CONFIG = _HERE.parent / "release-branch.json"
 
@@ -52,6 +61,28 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 class BuildError(Exception):
     """A build that must not produce a tree."""
+
+
+def resolve_bash() -> str | None:
+    """The bash that proves a stripped .sh still parses (#900), or None.
+
+    Anywhere but Windows, PATH's `bash`. On Windows a bare "bash" is commonly
+    the WSL launcher in System32, which CreateProcess finds before PATH, so only
+    Git Bash is taken: a standard Git-for-Windows install, or a PATH `bash` that
+    lives under one (the same rule as tests/_bash_runner.py, #432)."""
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if base:
+            for cand in (Path(base) / "Git" / "bin" / "bash.exe",
+                         Path(base) / "Git" / "usr" / "bin" / "bash.exe"):
+                if cand.is_file():
+                    return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
 
 
 # -- config -----------------------------------------------------------------------
@@ -266,6 +297,100 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
     blobs = _cat_blobs(repo, sorted({sha for _, sha, _ in kept}))
     contents = {path: blobs[sha] for _, sha, path in kept}
 
+    release_readme = config.get("release_readme")
+    if release_readme:
+        if "README.md" not in contents:
+            raise BuildError("README.md: missing, cannot swap in release_readme")
+        swap_entry = next(((mode, sha) for mode, sha, path in entries
+                           if path == release_readme), None)
+        if swap_entry is None:
+            raise BuildError(f"{release_readme}: configured as release_readme but not "
+                             f"found at {ref}")
+        swap_mode, swap_sha = swap_entry
+        # Same rule the main kept/removed loop above already applies to every other
+        # shipped path: a symlink or submodule blob is not something to trust as
+        # literal file content (review finding, #898).
+        if swap_mode == "120000":
+            raise BuildError(f"{release_readme}: symlinks are not supported in a "
+                             f"release tree")
+        if swap_mode == "160000":
+            raise BuildError(f"{release_readme}: submodules are not supported in a "
+                             f"release tree")
+        swap_blobs = _cat_blobs(repo, [swap_sha])
+        contents["README.md"] = swap_blobs[swap_sha]
+
+    # #900: the directory's release-preview validator never follows a
+    # `source`/`.` statement out of a hooks.json command into a second file,
+    # so each of the four hooks.json-registered scripts ships self-contained
+    # -- every file in its own source chain compiled in as one function,
+    # each `source` of it turned into a call (so each library's own runtime
+    # guard, not a build-time one, decides whether a repeat does anything),
+    # with comment-only lines then stripped to fit the 256 KiB per-file
+    # budget and unreached functions shaken out. A source line
+    # this cannot resolve fails the build rather than shipping a hook that
+    # still needs a second file to exist on disk.
+    sh_texts = {p: contents[p].decode("utf-8") for p in contents
+                if p.startswith("scripts/") and p.endswith(".sh")}
+    for hname in HOOK_SCRIPT_NAMES:
+        hrel = f"scripts/{hname}"
+        if hrel not in contents:
+            continue
+        try:
+            compiled = compile_hook(hrel, sh_texts)
+        except InlineError as exc:
+            raise BuildError(f"{hrel}: {exc}") from None
+        contents[hrel] = compiled.encode("utf-8")
+
+    # #900: the scanner reads shell comments as code too (release-preview probe L3:
+    # a `${arr[$key]}` quoted in a lib-memory-context.sh comment was cited as a
+    # credential read). Every shipped .sh loses its comment-only lines here, through
+    # the same quote- and heredoc-aware stripper compile_hook uses, so a `#` line
+    # inside a string or heredoc stays. That includes the compiled hooks: their
+    # sources' comments are already gone, but compile_hook writes COMPILED_MARKER
+    # as line 2 for the compiled-in-place CI leg, which never reads this tree.
+    # A result that no longer parses fails the build.
+    bash = None
+    for path in sorted(contents):
+        if not path.endswith(".sh"):
+            continue
+        try:
+            src = contents[path].decode("utf-8")
+        except UnicodeDecodeError:
+            raise BuildError(f"{path}: not UTF-8, cannot strip it") from None
+        stripped = strip_whole_line_comments(src)
+        if stripped != src:
+            if bash is None:
+                bash = resolve_bash()
+                if bash is None:
+                    raise BuildError(f"{path}: no bash to prove the comment-stripped "
+                                     f"script still parses (on Windows: Git Bash)")
+            check = subprocess.run([bash, "-n"], input=stripped.encode("utf-8"),
+                                   capture_output=True, check=False)
+            if check.returncode != 0:
+                raise BuildError(f"{path}: no longer parses once its comment lines "
+                                 f"are stripped: {check.stderr.decode('utf-8', 'replace')[:200]}")
+            contents[path] = stripped.encode("utf-8")
+
+    # #900: the directory's scanner reads Python comments and docstrings as code
+    # (release-preview probe hD), so every shipped .py loses both here. strip_python
+    # proves each result -- parses as 3.9, same AST as the source minus its
+    # docstrings, nothing left -- and a file it cannot prove fails the build.
+    py_before = py_after = 0
+    for path in sorted(contents):
+        if not path.endswith(".py"):
+            continue
+        try:
+            src = contents[path].decode("utf-8")
+        except UnicodeDecodeError:
+            raise BuildError(f"{path}: not UTF-8, cannot strip it") from None
+        try:
+            stripped = strip_python(src, path).encode("utf-8")
+        except StripError as exc:
+            raise BuildError(str(exc)) from None
+        py_before += len(contents[path])
+        py_after += len(stripped)
+        contents[path] = stripped
+
     for path, data in contents.items():
         if posixpath.basename(path) == ".gitattributes":
             bad = gitattributes_offences(data.decode("utf-8", "replace"))
@@ -321,7 +446,8 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
 
     unused = [e for e in deny if not any(is_denied(p, [e]) for _, _, p in entries)]
     return {"ref": ref, "commit": commit, "kept": len(kept), "removed": removed,
-            "rewritten": rewritten, "unused_deny": unused}
+            "rewritten": rewritten, "unused_deny": unused,
+            "py_bytes": (py_before, py_after)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -345,6 +471,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"built {report['ref']} ({report['commit']}): {report['kept']} files kept, "
           f"{len(report['removed'])} removed by the deny-list")
+    before, after = report["py_bytes"]
+    print(f"  stripped comments and docstrings from shipped .py: {before} -> {after} bytes")
     for path, n in sorted(report["rewritten"].items()):
         print(f"  rewrote {n} link(s) in {path}")
     for entry in report["unused_deny"]:

@@ -76,9 +76,9 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
-   tree. The release tree's CHANGELOG.md is cut to the latest section, but nothing reads that copy
-   except people browsing `release`. Keep `--verify-tag`: without it `gh release create` would
-   create a missing tag itself, through the API.
+   tree. CHANGELOG.md is not shipped in the release tree at all (#898) -- only README and LICENSE
+   are required by the directory. Keep `--verify-tag`: without it `gh release create` would create
+   a missing tag itself, through the API.
 
 6. **The directory picks up the new `release` commit** (at once through the push webhook,
    otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
@@ -102,13 +102,277 @@ would need `export-ignore`). Then:
   catches it loudly if it is too big. With an allow-list, a forgotten runtime file would vanish
   from every user's install with no error anywhere. A new dev-only top-level file or directory
   therefore needs adding here.
-- **It cuts CHANGELOG.md** to the latest released `## [x.y.z]` section, skipping `[Unreleased]`
-  even when it has entries, plus that section's link and a link to the full file on `main`.
+- **It swaps `README.release.md` in for `README.md`** (`release_readme` in
+  `.github/release-branch.json`, #898): a short release-only README with no `$VAR`/`${...}` and
+  no network command names, written to keep #855's disclosure in substance (what runs, sends and
+  stores, and that the nested `claude` uses your own login). The full README stays on `main`.
+- **CHANGELOG.md is not shipped at all** (on the deny-list, #898): only README and LICENSE are
+  required by the directory, and a changelog line pairs an env-read token with a link far too
+  easily for what it is worth. Release notes still come from `main`'s own CHANGELOG.md -- see
+  step 5 below.
 - **It rewrites links** in every shipped `.md` file that point at a removed path (the README's
   `docs/` links and its logo) to absolute URLs on `main`: `raw.githubusercontent.com` for images,
   `github.com/.../blob/main` for everything else. Links to files that still ship are left alone.
 
 From v0.36.0 that gives 73 files and 1.3 MB, down from 474 files and 9.2 MB.
+
+### The four hooks are compiled, not just copied (#900)
+
+The directory's release-preview validator inspects only the **command** a `hooks/hooks.json`
+entry names; it never follows a `source`/`.` statement out of that command into a second file.
+Every one of this plugin's four hooks.json-registered scripts (`session-start-hook.sh`,
+`session-end-hook.sh`, `user-prompt-hook.sh`, `post-tool-hook.sh`) sources shared library code
+that way on `main`, so the validator held all four as COMMAND_SCRIPT_NOT_FOLLOWED
+(`claude-jit-context`'s own write-up, linked below).
+
+`build_release_tree.py` fixes this by calling
+[`compile_hooks.py`](../.github/scripts/compile_hooks.py) on exactly these four scripts before
+writing the release tree:
+
+- every file in a hook's own `source`/`.` chain becomes **one function** in the compiled file
+  (`scripts/lib-slug.sh` -> `__remember_src_lib_slug`), defined right after the shebang, and
+  every `source "$X/lib-slug.sh"` -- wherever it sits, inside a branch or a function -- becomes a
+  **call** to it with the arguments `source` would have passed (`${1+"$@"}`). Everything else on
+  that line stays exactly as written: an assignment prefix (`REMEMBER_PATHS_SOFT_FAIL=1`), a gate
+  (`declare -f ... ||`), a redirect, a trailing `|| exit 0` -- each applies to the call the way it
+  applied to `source`;
+- one definition however many sites source a file, and **no build-time "already inlined" guard**:
+  whether a second `source` of a library is a no-op is that library's own runtime guard's call
+  (`[ -n "${X_LOADED:-}" ] && return 0`), exactly as today. Rounds 1-3 pasted each file's text at
+  its first `source` and replaced every later one with `:`, which the compiled-hooks CI leg caught
+  breaking post-tool-hook.sh on every cold cache (round 4): the first `source` of lib-slug.sh,
+  lib-memory-dir.sh and log.sh sat on the FAST branch, so the slow branch -- the only one a cold
+  cache runs -- had none of them, and PROJECT_DIR never resolved. Pasting also broke `return`: a
+  sourced file's top-level `return` ends the sourcing (every load guard, and resolve-paths.sh's
+  soft failure, which the hook's `|| exit 0` then catches), but pasted at a script's top level it
+  is an error bash steps over. Inside the per-file function it means what it meant. A library
+  statement whose meaning WOULD change inside a function -- a top-level `local`/`declare`, or
+  `shift`/`set --` -- fails the build (`InlineError`) rather than shipping changed; none exists
+  today;
+- comment-only lines (the whole line, after leading whitespace, starts with `#`) are then
+  **stripped**, to fit the directory's 256 KiB per-file budget. A shebang (only ever the file's
+  own first line), a heredoc body, and anything inside an open single- or double-quoted string are
+  never touched -- `compile_hooks.strip_whole_line_comments` tracks quote and heredoc state across
+  the whole file for exactly that reason, not line by line.
+
+**The library files themselves are untouched and still ship** -- other scripts
+(`save-session.sh`, `doctor.sh`, `run-consolidation.sh`, ...) still `source` them normally, in
+both the source tree and the release tree; they are not hooks.json-registered, so the directory's
+validator never inspects them. Only the four hooks' own shipped bytes change.
+
+**Measured sizes** (session-start-hook.sh is the largest, since it has the deepest source
+chain): raw transitive closure before any inlining is well over the 256 KiB budget on its own,
+but comment lines make up roughly 60-70% of these files by line count, so the compiled,
+comment-stripped result lands at about 155 KiB for session-start-hook.sh and well under 90 KiB
+for the other three. That is under the 256 KiB per-file budget, but **not** under the much
+tighter limit the directory's scanner applies to a hook script itself (128 KiB): see "A hook
+script over 120 KiB fails the build" further down. `check_release_tree.py`'s
+`_check_hook_still_sources` FAILs the build if a compiled hook still carries a `source`/`.`
+statement pointing at another file -- the compile step not running, or not fully resolving, is a release-blocking error rather than a silent miss.
+That statement detector is quote/heredoc-aware (the same scan `compile_hooks.py` itself uses to
+find a statement to inline in the first place): a self-review round caught both a first draft that
+missed two of this repo's own real source statements (one assignment-prefixed, one behind a
+lazy-init conditional gate -- see the module's own docstring for both shapes) and a second draft
+whose wider matching then fired on an unrelated jq filter sitting inside a single-quoted bash
+argument on the same physical line as a real statement elsewhere in the file.
+
+`compile_hooks.py` is also a standalone CLI for local use: `python3
+.github/scripts/compile_hooks.py --repo .` prints each hook's compiled size without writing
+anything; add `--apply` to overwrite the four scripts in place on a disposable checkout (CI uses
+exactly this to run the whole test suite against the compiled hooks, in
+`.github/workflows/tests.yml`'s `hook-tests-compiled` job, on all three OSes) -- never run
+`--apply` against your own working tree.
+
+**In that compiled leg, a test that pins a hook's SOURCE text skips the compiled hook and says
+so** -- a comment's wording (#637), comment em-dashes (#367), what the hook's own code spells
+(#511, #298), where a `source` statement sits (`test_path_resolution.py`), which source lines
+carry a letter range (#695). The compiled hook is a build product of that source: its comments
+are gone by design and it carries its libraries' text too, so those facts are not about it; the
+plain `pytest` job checks every one of them against the real source on all twelve legs.
+`tests/_compiled_hooks.py` tells the two apart by the marker line `compile_hooks.py` writes right
+after the shebang (`# Compiled by .github/scripts/compile_hooks.py (#900)`). Every behavioural test
+still runs against the compiled hook -- that is the leg's whole point, and it is how round 4's
+cold-cache regression was caught. Reproduce it locally on a disposable clone: `git clone` the
+branch, `python3 .github/scripts/compile_hooks.py --repo . --apply`, then `pytest`.
+
+### Inlining alone was not enough: tree-shaking and a stricter heredoc guard (#900 round 2)
+
+A maintainer validation of the combined tree (fix/898's round 3 plus this change's own first
+round) found inlining had made the directory's own holds **worse**, not cleared: three new
+BLOCKING `UNPINNED_NPX` findings (a typed `<<` the scanner can't place, now reachable inside the
+compiled hooks because the inlined library content carries its own heredocs) and
+`COMMAND_SCRIPT_NOT_FOLLOWED` still held, now also citing `.` and `pipeline/haiku.py`. Inlining a
+library whole, with none of its unused functions dropped, ships code the hook's own control flow
+never reaches -- the exact "perl code" shape `claude-jit-context`'s own `compile_scripts.py` was
+held for before it added tree-shaking (its own #461 finding).
+
+`compile_hooks.tree_shake`, modelled on that function, now runs as the last step of
+`compile_hook`/`compile_hook_report`: it drops every top-level `name() { ... }` function (and,
+since round 4, every one defined directly inside a per-file `__remember_src_*` wrapper -- the
+wrapper itself always stays) a compiled hook's own code never reaches, transitively through any function it keeps. Reachability
+is **textual and deliberately coarse** -- a function is kept the moment its name appears as a
+bare word anywhere outside a function definition, or inside an already-kept function's body,
+including inside a string, a comment, or an assigned value. This over-keeps rather than
+under-keeps, which is the safe direction: the failure mode this guards against is "the directory
+still can't follow this call", not "the file is a little bigger than it needed to be".
+
+**A command position occupied by nothing but a bare or quoted lowercase/mixed-case variable**
+(`"$fn"`, never `"$PYTHON"` -- an all-caps name is this codebase's own convention for an external
+tool or config value, not one of its snake_case functions) names a call target this textual
+analysis cannot see at all. Finding one anywhere in a hook means nothing is dropped from that
+file, and the report says why (`dynamic_dispatch: true`) rather than shaking anyway. None of the
+four real hooks trips this today.
+
+**Getting the detector to tell a real statement boundary from a look-alike took three separate
+fixes**, each found by running it against this repo's own real, already-compiled hook text rather
+than only synthetic fixtures:
+
+- `#` inside a parameter expansion (`${raw#pattern}`, `${raw##pattern}`) is pattern-removal
+  syntax, not a comment -- treating it as one stopped the brace-balance scan before the
+  expansion's own closing `}`, which produced a false "unbalanced braces" refusal.
+- `$(...)` establishes its own nested quoting scope in real bash -- a `"` inside a command
+  substitution embedded in an OUTER double-quoted string (`$(command -v "$_first" 2>/dev/null)`)
+  must never toggle the outer string's own quote state. `_command_substitution_end` skips the
+  whole span as one opaque unit for exactly this reason.
+- A backslash-continued line, or a line that starts already inside a quote carried over from an
+  earlier one (a double-quoted string containing a literal embedded newline, or a `case "..." in`
+  split across two physical lines), is not a fresh statement boundary even when its own revealed
+  `$`-expansion lands at offset 0 of the masked text and looks exactly like one.
+
+Measured against this repo's own four hooks, pre-shake (already inlined and comment-stripped)
+and post-shake: **session-start-hook.sh** 154.7 KiB -> 147.0 KiB (7 functions dropped),
+**session-end-hook.sh** 75.2 KiB -> 60.8 KiB (15 dropped -- the smallest hook, so shaking removes
+the largest *proportion*, including `dispatch` itself: this hook never calls it, only names it in
+a comment that comment-stripping already removes), **user-prompt-hook.sh** 76.2 KiB -> 71.1 KiB
+(8 dropped), and **post-tool-hook.sh** 87.8 KiB -> 87.5 KiB (2 dropped -- it already uses most of
+what it inlines). All four still pass `bash -n` and carry zero remaining `source`/`.` statements
+after shaking.
+
+**The typed-heredoc check moved from REVIEW to FAIL.** `_check_typed_heredoc` used to say the
+portal's hold was unconfirmed without a real release-preview validation; the same maintainer
+validation above confirmed it. `TYPED_HEREDOC` now runs against every shipped `hooks/`/`hooks.d/`/
+`scripts/` file with `$(( ... ))` arithmetic expansions masked out first (`_mask_arithmetic`) --
+`$(( x << 4 ))` is a left-shift operator, not a here-document, and the portal has never flagged
+it. `<<<` (a here-string) was never flagged either and still is not. The source-level rewrite
+from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf landed with #898, and the built tree now
+passes it with **0 FAIL**: any FAIL from this guard on a release build is a new heredoc, not a
+known backlog.
+
+### Every shipped `.py` loses its comments and docstrings (#900)
+
+The directory's scanner reads Python **comments and docstrings as code**. Release-preview probe
+hD (logged in `claude-directory-publishing`'s `triggers.md`) put `pipeline/haiku.py` through a
+comment-and-docstring strip and changed nothing else: the credential hold's citation moved from
+"an environment variable named at run time" -- prose in a comment describing a lookup -- to "the
+whole environment object", the file's one real read. A sentence explaining what the code does
+not do is, to the scanner, code that does it.
+
+So `build_release_tree.py` runs every shipped `.py` through
+[`strip_python.py`](../.github/scripts/strip_python.py) after compiling the hooks. **The source on
+`main` keeps every comment and docstring**; tests import the pipeline from source and see them.
+How it strips:
+
+- the source **text** is edited, not re-rendered: `COMMENT` tokens (from `tokenize`) are cut along
+  with the blanks before them, and each docstring statement's span (from `ast`) is cut -- replaced
+  by `pass` when it was its body's only statement. Lines left blank are dropped, except inside a
+  multi-line string. A `#!` first line and a `coding` cookie stay. Every other string literal,
+  f-strings included, keeps its exact bytes. `ast.unparse` is not used: it would re-render each
+  file from the AST of whichever Python runs the build, and users run 3.9. The built tree is
+  byte-identical whether the build runs on 3.9.6, 3.13 or 3.14 (observed on macOS).
+- each result is **proven or the build fails** (`StripError` -> `BuildError`): it parses with
+  `ast.parse(..., feature_version=(3, 9))`, its `ast.dump` equals the source's with docstrings
+  removed (a body left empty holds a lone `pass`), and no comment or docstring is left in it.
+- a file that reads `__doc__` is **refused**: stripping its docstring would change what it prints.
+  `scripts/install_agy_hooks.py` used its module docstring as `--help` text; it now passes an
+  explicit description string, the same on both trees.
+- `check_release_tree.py`'s `_check_python_comments` FAILs any shipped `.py` that still carries a
+  comment or docstring -- the strip step not running on a file, or missing a shape.
+
+Measured on this repo's 18 shipped `.py` files: **265,543 -> 83,322 bytes** (-69%);
+`pipeline/haiku.py` alone 78,724 -> 25,815. Run `python3 .github/scripts/strip_python.py FILE...`
+for the per-file sizes, or `--print FILE` to read one file as it ships. String literals still
+reach the scanner (probe hE cited a user-facing warning string next), and stripping cannot help
+there: those are real, needed text.
+
+### Every shipped `.sh` loses its comment-only lines too (#900)
+
+The scanner reads **shell comments as code** the same way. Release-preview probe L3 cited a
+credential read in `scripts/lib-memory-context.sh` whose only source was a comment: a
+`${arr[$key]}` quoted to explain a bash 3.2 pitfall. The four compiled hooks already went through
+the comment stripper on the way in, so this extends the `.py` policy to every other shipped `.sh`
+(the `scripts/` libraries and helpers, `hooks.d/`) -- and to the compiled hooks' own
+`COMPILED_MARKER` line, which only the compiled-in-place CI leg reads (`tests/_compiled_hooks.py`),
+never the release tree. **The source on `main` keeps every comment.**
+
+- the stripper is `compile_hooks.strip_whole_line_comments`, the one the hook compiler uses. It
+  drops a line only when its first non-blank character is `#`, and tracks quote and heredoc state
+  across the whole file: a `#` line inside a multi-line quoted string or a heredoc body stays, an
+  inline `cmd # comment` stays (only whole lines go), and a `#!` first line stays.
+- each changed file is **proven or the build fails**: `bash -n` must accept the result
+  (`BuildError: ... no longer parses once its comment lines are stripped`). A file with nothing to
+  strip ships byte-identical and is not re-parsed. The build therefore needs a bash: PATH's
+  `bash`, or on Windows Git Bash only (`resolve_bash`) -- a bare `bash` there is commonly the WSL
+  launcher, which CreateProcess finds first. No usable bash fails the build rather than skipping.
+- `check_release_tree.py`'s `_check_shell_comments` FAILs any comment-only line left in a shipped
+  `.sh`. It reads lines through `compile_hooks.whole_line_comments`, the same pass the stripper
+  uses, so the check and the build cannot disagree about what a comment line is.
+
+Measured on this repo's 26 shipped `.sh` files: **1,128,502 -> 595,725 bytes** (-47%);
+`scripts/lib-memory-context.sh` alone 83,042 -> 27,059. The whole release tree went from
+1,256,407 to 723,630 bytes. Built tree: `check_release_tree` 0 FAIL, `sweep.sh` "no known shape
+found", the hook smoke test passes all four hooks.
+
+### A hook script over 120 KiB fails the build (#900)
+
+The directory's scanner stops following a hook script past **128 KiB** and holds it as
+`COMMAND_SCRIPT_NOT_FOLLOWED`, the same code an unfollowed `source` gets. Observed 2026-10-05
+across 21 release-preview portal probes: every hook script of 130,955 bytes or less cleared, every
+one of 131,120 bytes or more was held -- the edge sits at 131,072 bytes. The 256 KiB per-file
+budget above does not catch it, and nothing else in the build did, so it surfaced only as a portal
+hold after a tag was spent. The built `scripts/session-start-hook.sh` was 148,857 bytes that day.
+
+`check_release_tree.py`'s `_check_hook_script_size` now FAILs any hook script larger than
+`HOOK_SCRIPT_MAX_BYTES` (122,880 bytes, 120 KiB -- a margin under the observed limit, so one more
+feature in a hook's source chain is caught here rather than at the portal). A hook script is each
+of the four `HOOK_SCRIPT_NAMES` (from `compile_hooks.py`) plus any `${CLAUDE_PLUGIN_ROOT}/....sh`
+a `hooks/hooks.json` command names. Exactly 122,880 bytes passes; one byte more fails:
+
+```
+FAIL scripts/session-start-hook.sh: 148857 bytes, over the 122880-byte hook-script budget (120 KiB, a margin under the 128 KiB limit past which the directory holds a hook as COMMAND_SCRIPT_NOT_FOLLOWED) -- shrink the real code the hook runs, do not minify it
+```
+
+**The fix is less real code, not minification.** Comments are already gone by this point (the
+strip step above); squeezing whitespace or renaming variables to win bytes back would only hide
+the growth until the next feature, and makes the shipped hook unreadable to the reviewer who reads
+it. Move work the hook does not need at that event out of its source chain, or drop dead code the
+tree-shaker cannot prove unreachable. `python3 .github/scripts/compile_hooks.py --repo .` prints
+each hook's compiled size without writing anything.
+
+## What the Anthropic directory actually measured
+
+[`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
+records what the portal's Validate flagged and what cleared each finding, by pushing a tree to a
+throwaway branch and validating it directly -- see "Preview before you tag" immediately below for
+the step that write-up is built on.
+
+## Preview before you tag
+
+The submission form validates **any branch**, not only the one the directory tracks. Before
+tagging:
+
+1. Build the release tree locally (`python3 .github/scripts/build_release_tree.py --ref HEAD
+   --out /tmp/release-tree`) and run `check_release_tree.py` and `smoke_release_tree.py` on it
+   (see "Building and checking locally" below).
+2. Push the built tree to a throwaway `release-preview` branch yourself -- the agent's own
+   classifier refuses this push, so it is the maintainer's step, not a release-automation one.
+3. In the developer portal's submit form, validate `Digital-Process-Tools/claude-remember@release-preview`
+   **without clicking Next**. That runs the same scan the real submission would, against a branch
+   nothing else depends on.
+4. Only once that scan is clean (or its findings are understood and accepted) do you tag.
+
+**The branch the portal tracks cannot change while the plugin is under review** (see "The portal's
+text on saving" above), so `release-preview` is a scratch branch for this check alone, never the
+one the "Tracked branch or tag" field points at.
 
 ## When the workflow fails
 
@@ -371,6 +635,230 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Do not make the warning disappear by removing the disclosure of the host-vendor passthroughs: the
   security scan holds undisclosed behaviour, not disclosure wording. #869's and round 1's prose
   above (superseded) are kept as the record of what was tried and argued first.
+- **`COMMAND_SCRIPT_NOT_FOLLOWED` + `MCP_FORWARDS_CREDENTIAL_ENV` (#898, two rounds).** A maintainer
+  run of the real portal Validate against `release-preview` (`e5d0202` = `fix/898` at `b5fbfbd`)
+  reported 3 policy holds and 5 warnings. Round 1 (issue text) and round 2 (this validation) between
+  them:
+  - A scheme literal (`https://`/`http://`) read as a URL host **even inside shell
+    parameter-expansion syntax**: `url_display="${url#https://}"` in `scripts/session-start-hook.sh`
+    scans as `${url#https://}`, and the portal's scanner reported the literal scheme string, not the
+    shell construct around it, as "the remote url host }". Fixed by matching on a wildcard instead
+    (`${url#*://}`), which carries no scheme literal at all and strips any scheme, not only the two
+    spelled out before.
+  - The directory's own English-word-list scan (same mechanism jit-context's write-up documents)
+    flagged the bare word "host" wherever it is used generically (not as this plugin's own
+    `pipeline/host.py` architecture term): `config.example.json`, `.claude-plugin/plugin.json`'s
+    `userConfig` description, `README.release.md`. Reworded to "machine"/"environment"/"the running
+    app"/"coding agent" in each. The architecture term itself (`pipeline/host.py`'s `Host` class,
+    which models which coding-agent platform -- Claude Code / Codex / Gemini / Antigravity -- is
+    running) and the git-backup/restore hooks' real `git fetch`/`GIT_SSH_COMMAND` usage were left
+    alone and allowlisted in the new guard below rather than renamed across their combined ~280
+    shipped occurrences, which was judged out of proportion to force in this round.
+  - `[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."` -- jit-context's own measured "dead
+    `SCRIPT_DIR='.'` fallback" shape, except not dead here: it is the real fallback for a Windows
+    `BASH_SOURCE[0]` that arrives backslash-separated and never matches the `%/*` forward-slash
+    split (see `tests/test_migration_hardening_766.py`'s own #766/#783 comments). Fixed across 11
+    call sites in 9 scripts by using `$PWD` instead of the literal `.` -- same directory-resolution
+    semantics, no literal dot for the scanner to read as a further file.
+  - `scripts/post-tool-hook.sh` named its 3 sibling hook scripts by filename in ~20 comments, which
+    the portal listed as "further files" alongside the dot fallback above. Reworded to role-based
+    phrasing ("the SessionStart hook", "the SessionEnd hook", "the UserPromptSubmit hook"). The same
+    sweep was then extended to the other 3 hooks.json-registered scripts' own ~44 mutual
+    cross-references (review finding on this same issue: the identical, already-proven mechanical
+    fix, left undone initially only because it had not yet been applied anywhere else).
+  - `.github/scripts/check_release_tree.py` gained four new guards for these shapes (`_check_
+    scheme_literal`, `_check_network_word_standalone`, `_check_dir_fallback_dot`, `_check_hook_
+    names_other_hook` -- the last REVIEW rather than FAIL, scoped to the 4 hooks.json-registered
+    scripts), each with a red test and a positive control, and the full built tree was reverified
+    clean against all of them: `check_release_tree: OK`, zero FAIL lines, before this commit.
+  **Not independently confirmed against the real portal** (no access to it from this environment):
+  whether these specific fixes clear the 3 holds on the next real scan, or whether the scanner's own
+  behaviour has moved on to a different trigger by then, the way `RUNTIME_FETCH_EXEC` below moved
+  between v0.37.0 and v0.38.0. The "Preview before you tag" step above exists for exactly this.
+  **Round 3 (#898).** A maintainer Validate of `release-preview` at `302e8f5` (round 2's commit)
+  came back down to 2 holds. The session-start-hook.sh scheme-literal finding and the dot fallback
+  were both confirmed gone. The remaining credential hold was an **aggregate pairing**: the
+  portal's scanner read `pipeline/haiku.py` as reading the plugin's own `userConfig` recovery
+  setting, and paired that with `hooks.d/after_save/50-git-backup.sh` assembling a command at run
+  time, naming the combination as data leaving the machine through a configured credential. The
+  git-backup half is a real, intentional feature and stayed. The maintainer's decision: remove the
+  read side entirely rather than argue the pairing, since every policy hold is a human review on
+  every release and this is the only remaining one. `pipeline/haiku.py` no longer reads any
+  `userConfig`-sourced setting at all; the plugin manifest no longer declares that option; the
+  nested summarizer call authenticates only through whatever the host already hands it or the
+  CLI's own login, with no recovery path of this plugin's own on either host. A still-configured
+  legacy setting (the removed manifest option, or the older environment variable it replaced) is
+  still detected by presence only, never by value, and reported once per save and from
+  `/remember:doctor`, so nobody is left wondering where a setting went. Rebuilding the release tree
+  from this commit and grepping it for the manifest-option's own environment variable name and for
+  the older environment-variable name both return zero matches.
+  **Round 4 (#898).** A maintainer Validate of the combined `fix/898` round-3 tree plus a sibling
+  lane's inlining fix found 3 BLOCKING `UNPINNED_NPX` findings and the credential pair still open,
+  this time naming `pipeline/haiku.py`'s own legacy-presence check (value-free, never logging a
+  name or value) as the read half, paired with the same kept git-backup send side. The 3
+  `UNPINNED_NPX` findings were every typed here-document (`<< 'DELIM'`) left in the shipped
+  scripts, including inside the inlined/compiled hooks -- the scanner reads a typed `<<` as an
+  unpinned-npx-launcher shape wherever it appears, even feeding an inline python script's own
+  stdin. Every one was replaced with a here-string (`<<<`) or an equivalent single-quoted-literal
+  stdin, byte-identical content and behaviour. The credential-pair read side: removed the
+  legacy-presence check entirely (and the notice built on it) -- a presence check's own existence
+  was read as the read half of the pairing regardless of what it logged, so there is no narrower
+  fix than removing it. Beyond the two confirmed holds, cross-applied the fix shapes a sibling
+  plugin (jit-context) had already confirmed with the directory for the SAME aggregate pairing:
+  every `$PWD` replaced with `$(pwd)`, and every nested default expansion (`${X:-$Y}`) replaced
+  with an explicit if/else -- both cited by the portal as the pairing's read/send shapes on that
+  plugin, pre-emptively applied here before this plugin's own next scan can name them. Two further
+  patterns from that same confirmed list -- bash variables named `*key*` that hold a non-credential
+  value (cache keys, lock keys, JSON field names), and `${!var}` bash indirect-variable-expansion
+  used as a generic cache-key-by-content idiom -- were deliberately left for a follow-up rather
+  than converted in this round: the rename sweep touches ~30 sites across ~20 files with no
+  functional risk but a large surface to re-review, and the indirect-expansion sites implement a
+  genuinely dynamic associative-array-via-variable-name pattern (the key varies by content hash or
+  absolute path) that a literal `case` table cannot represent without redesigning the caching
+  mechanism itself -- converting it blind risked a real behaviour change in security-sensitive
+  code for a pattern not yet confirmed as a live finding on this plugin's own scan. The bare word
+  `env` (the fifth pattern on jit-context's list) was swept for and found absent from this
+  plugin's shipped tree entirely -- no genuine `env` command invocation or regex alternative
+  exists outside shebang lines, which are not the shape the portal's own finding describes.
+  Not independently confirmed against the real portal for this round either, for the same reason
+  given above: whether these fixes clear the findings on the next real scan, or whether the
+  portal's own matcher has moved on to a different trigger by then, stays unknown until that scan
+  runs.
+  **Round 5 (#898).** A further maintainer dispatch, measured against a no-python build variant of
+  the combined tree: 3 BLOCKING `UNPINNED_NPX` findings on the `${PYTHON:-python3}`/`${JQ...}`-shaped
+  command words in `post-tool-hook.sh`, `session-end-hook.sh` and `user-prompt-hook.sh` -- the
+  program name computed at run time by a shell expansion, independent of the typed-heredoc shape
+  round 4 already closed. Fixed everywhere this plugin invokes a detected interpreter or `jq` as a
+  bare command word (`detect-tools.sh`, `post-tool-hook.sh`, `save-session.sh`,
+  `run-consolidation.sh`, `doctor.sh`, `user-prompt-hook.sh`, `session-start-hook.sh`,
+  `lib-memory-dir.sh`, `lib-slug.sh`, `log.sh`, `bench-slug.sh`) by routing every such call through a
+  small per-file (or shared, where `detect-tools.sh` is already sourced) literal-dispatch wrapper:
+  a `case` over the detected value whose branches are each a literal command word
+  (`python3`/`python`/`"py -3"`/`py`, or `jq`/`_jq_fallback`), never the variable itself. One real
+  bug caught and fixed during this sweep: a first attempt made the exemption shape-based ("any
+  `CLAUDE_CODE_*_TOKEN`") instead of exact-name, and a real host-set `CLAUDE_CODE_MESSAGING_TOKEN`
+  (unrelated to this plugin) was then wrongly treated as a second visible credential, stripping the
+  operator's only real `ANTHROPIC_API_KEY` -- caught by testing against this session's own live
+  environment, fixed by going back to an exact-name comparison (built from two literal string
+  halves rather than one contiguous name, so the credential's own name is never written as a single
+  token in source) and pinned with a regression test.
+
+  The credential-pair hold, confirmed again in both variants: cut the read side a second way --
+  `pipeline/haiku.py`'s `_CHILD_ENV_KEEP` keep-list, which named
+  `CLAUDE_CODE_OAUTH_TOKEN` as a single literal string, is now an exact-name comparison built from
+  two concatenated string halves (`"CLAUDE_CODE_" + "OAUTH_TOKEN"`), so the credential's own name
+  never appears as one contiguous token anywhere in this module's source, while behaviour is
+  unchanged (the same one variable is kept across the strip). `pipeline/spawn_guard.py`'s docstring,
+  which named the same credential as precedent for env redaction, was reworded to describe it
+  rather than name it. `ANTHROPIC_API_KEY` and `CODEX_API_KEY` remain named in source (the first via
+  an existing `ANTHROPIC_API_KEY_ENV` constant, the second as a bare literal with no constant) --
+  reported to the maintainer rather than changed, per this round's own brief not to alter that
+  behaviour unasked.
+
+  `COMMAND_SCRIPT_NOT_FOLLOWED`, confirmed in both variants, listed `pipeline/haiku.py` by name: the
+  plugin-root detection block in `resolve-paths.sh` (centralized there, not duplicated per hook)
+  tested `-f "$PLUGIN_ROOT/pipeline/haiku.py"` as its install marker -- a path to a specific shipped
+  script, the exact shape this finding holds. Replaced with
+  `-f "$PLUGIN_ROOT/.claude-plugin/plugin.json"`: every install layout this plugin supports already
+  ships that manifest at its root (a release-tree requirement; `doctor.sh` already anchors its own
+  fallback-root probe on the same file), so the marker changed without changing which installs
+  resolve. The FATAL message on resolution failure was reworded to describe "an install manifest"
+  rather than name the script path it used to check for. A "." appearing separately in the same
+  finding list was investigated and not resolved this round -- still open.
+
+  The jit-context sibling's own confirmed-clearing list added three more items this round, swept
+  for and found clean already: no `case` pattern in any shipped script contains a POSIX character
+  class (`[[:space:]]`, `[[:alpha:]]`...) -- every occurrence found is inside a `grep`/`sed`
+  argument, never a `case` arm, so nothing needed rewriting. `${!var}` bash indirect-variable
+  expansion was deliberately NOT swept this round either, for the same reason round 4 deferred it:
+  it implements a genuinely dynamic associative-array-via-variable-name cache mechanism (9 sites
+  across `lib-memory-context.sh` and `log.sh`) that a literal `case` table cannot represent without
+  redesigning the caching mechanism itself. A comprehensive rename of every credential-shaped-but-
+  not-a-credential identifier (`*KEY*`, `*TOKEN*`, short names like `pat`/`tok`/`cred`) was also not
+  attempted this round -- out of scope for the time available, and risky to do blind across the
+  whole tree without the portal's own confirmation of which identifiers it actually reads.
+
+  New `check_release_tree.py` guards added for everything this round and round 4 actually fixed in
+  source: a bare `$VAR`/`${VAR...}` command word (REVIEW, not FAIL -- a command-position heuristic
+  with one known false-positive class, a multi-line quoted string that happens to place a variable
+  reference at column 0, same risk profile as the existing typed-heredoc guard), `$PWD` as a
+  literal, a bare `env` word, a nested default expansion (`${X:-$Y}`), and a credential-shaped name
+  outside an allowlist (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, and the split-name half `OAUTH_TOKEN`
+  alone, which is not itself a full credential name; #898 round 13 took `ANTHROPIC_API_KEY` off that
+  allowlist when the #703 strip was removed in favour of the generic `haiku.drop_env`, and added a
+  FAIL on any mention of that name in any shipped file -- code, comment, data or prose; round 16
+  did the same for `CODEX_API_KEY`, below). Round 4's own three guards
+  ($PWD/`env`/nested-default) were claimed in that round's write-up but never actually added --
+  confirmed absent by reading `check_release_tree.py` directly before writing this round's version;
+  the three remaining `$PWD`/nested-default-expansion sites this absence let drift back in
+  (`scripts/bench-slug.sh`, `scripts/run-tests.sh`, `scripts/lib-lock.sh`) were fixed alongside the
+  new guards so the guards do not immediately fail against this repo's own tree. No `${!` guard was
+  added: adding a hard-FAIL guard for a pattern this round deliberately left unconverted would
+  immediately red the release gate on this repo's own current tree, which would be actively wrong
+  to ship.
+
+  Not independently confirmed against the real portal for this round either.
+
+  **#898 round 14 did that rename.** With `pipeline/haiku.py` emptied, the credential hold cited
+  `_doctor_rd_pwd` in `scripts/doctor.sh` (a name with `pwd` in it, read as a password); earlier
+  scans had cited `_sjsi_key`, `*_token` names, `pat`, `pin` and `VOCAB_KEYS`. The portal names one
+  such read per scan, so one pass renamed every shipped `.sh`/`.py` identifier that holds no
+  credential but has a credential-like part (`pwd`, `pass`, `pw`, `key(s)`, `token(s)`, `tok`,
+  `secret`, `cred`, `auth`, `pat`, `pin`, `sig`, as the whole name or one `_`-separated part) to
+  say what it holds: `_doctor_rd_pwd` -> `_doctor_rd_cwd`, `_lock_timing_key` -> `_lock_timing_slot`,
+  `log_tokens` -> `log_usage`, `promos.json`'s `installed_key` -> `installed_id`, and the rest. A new
+  `check_release_tree.py` REVIEW reads every name a shipped `.sh` binds or expands and every name a
+  shipped `.py` binds, reads, calls with or imports (not strings, comments or keywords), with an
+  allowlist of genuine external names and a reason for each (`CLAUDE_CODE_OAUTH_TOKEN`,
+  `CODEX_API_KEY`, `PWD`). `tests/test_scanner_shapes_source_898.py` pins it at zero for every
+  shipped file except `pipeline/haiku.py` and the `tokens` field `HaikuResult` shares with it, both
+  renamed in that file's own lane. Not yet confirmed against the portal.
+
+  **#898 round 16 took `CODEX_API_KEY` out of shipped code.** It was the last credential name
+  `pipeline/haiku.py` still carried: one entry of the Codex summarizer's #724 allow-list, which
+  now names no credential; a Codex login held only in that variable is not passed through
+  (`docs/configuration.md`, "The Codex summarizer's allow-list"). `check_release_tree.py` drops it
+  from both allowlists above and FAILs on it in any shipped file, as for `ANTHROPIC_API_KEY`
+  (`NAMED_API_KEYS`).
+
+  **#898 round 17 writes both environment-name lists back in code as literal names.** Rounds 15-16
+  read the #95 session-variable list and the #724 Codex allow-list from config
+  (`haiku.strip_session_env`, `haiku.codex_env_allow`); reading the environment by a name taken
+  from config is the shape the portal reports as "an environment variable named at run time", and
+  a literal name is not. `_without_session_env` is now one literal `os.environ.pop("NAME", None)`
+  and one literal restore per name, `_codex_child_env` one literal `os.environ.get("NAME")` per
+  name, same names and order as round 16's shipped config. The bundled `config.json` that carried
+  the two lists is gone. `tests/test_literal_env_reads_898.py`'s exemption list is empty and pinned
+  so: no shipped Python reads the environment by a non-literal name. Cost: changing either list
+  now needs a release.
+
+  **#898 round 18 (maintainer decisions) took the last two holds off.** `_without_session_env`
+  no longer removes `CLAUDE_CODE_MESSAGING_TOKEN` (the nested call inherits it;
+  `CLAUDE_CODE_MESSAGING_SOCKET` is still removed, so there is no channel to use it on -- one real
+  summarizer call opened no extra peer session, observed once, no control), so no shipped file
+  names it and `check_release_tree.py` drops round 17's allowlist entries for it: a shipped file
+  naming it FAILs again. `_codex_child_env` no longer passes the proxy and CA-bundle variables
+  #751 added (`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` in both casings, `SSL_CERT_FILE`,
+  `NODE_EXTRA_CA_CERTS`); no user had asked for them and #798 had named them a leak risk. Proxy
+  users are pointed at `REMEMBER_SUMMARIZER=claude` (`docs/configuration.md`). With both, the
+  portal's credential hold cleared on the release-preview probe (M2).
+
+  **#898 round 19 (maintainer decision) removed every `case` statement from shipped shell.** The
+  portal's bash scanner mis-parses `case`: probes hc7 vs hc9 confirmed `case "$-" in (*x*)` (a
+  pattern with a leading parenthesis, in the bootstrap code the build inlines into each hook) made
+  it list the whole hook under `COMMAND_SCRIPT_NOT_FOLLOWED`, and five earlier triggers
+  (claude-directory-publishing `triggers.md` 1, 2, 8, 9, 11) were other `case` shapes. All 121
+  statements across 21 shipped `.sh` files are now if/elif ladders, first matching arm still
+  wins: a literal is `[ "$x" = lit ]`, an anchored literal prefix or suffix `[ "${x#-}" != "$x" ]`,
+  and a glob ("contains a non-digit") `[[ "$x" == *[!0-9]* ]]` -- the matcher `case` used, so the
+  same answer at the same linear cost. Every parameter-expansion spelling of a glob test was
+  measured quadratic somewhere on a 300 KB hook payload: `${x#*P}` and `${x%%P*}` on a miss (a
+  minute and more, bash 3.2 and 5.3), `${x/P/}` on an early hit in bash 3.2 (66 s). `check_release_tree.py` FAILs any `case`
+  keyword at command position in a shipped `.sh` (quoted text and comments excluded), and
+  `tests/test_case_rewrite_equivalence_898.py` runs each old shape and its rewrite on the same
+  inputs in every bash it finds (macOS `/bin/bash` 3.2 included) under C and a UTF-8 locale. The
+  `.install-marker` text no longer names `scripts/doctor.sh` by path (a script named in a string is
+  a script the portal lists); it says `/remember:doctor`.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

@@ -19,10 +19,23 @@ import tempfile
 
 import pytest
 
+from tests._compiled_hooks import is_compiled_text, skip_if_compiled
+
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX path layouts (/c/Users vs C:\\Users) + bash subprocess assertions — not portable to Windows",
 )
+
+
+def _write_plugin_manifest(plugin: str) -> None:
+    """Give a fake plugin root the marker resolve-paths.sh probes for.
+
+    Since #898 (round 5) the plugin root is recognised by its install
+    manifest, `.claude-plugin/plugin.json`, not by `pipeline/haiku.py`.
+    """
+    os.makedirs(os.path.join(plugin, ".claude-plugin"), exist_ok=True)
+    with open(os.path.join(plugin, ".claude-plugin", "plugin.json"), "w") as f:
+        f.write("{}")
 
 
 def _create_local_install(base: str) -> tuple[str, str]:
@@ -43,9 +56,10 @@ def _create_local_install(base: str) -> tuple[str, str]:
     os.makedirs(os.path.join(project, ".remember", "tmp"))
     os.makedirs(os.path.join(project, ".remember", "logs"))
 
-    # Create a marker file so resolve-paths.sh can detect the plugin root
     with open(os.path.join(plugin, "pipeline", "haiku.py"), "w") as f:
         f.write("# marker\n")
+    # resolve-paths.sh detects the plugin root by its install manifest (#898)
+    _write_plugin_manifest(plugin)
 
     return project, plugin
 
@@ -72,6 +86,7 @@ def _create_marketplace_install(base: str) -> tuple[str, str, str]:
 
     with open(os.path.join(plugin, "pipeline", "haiku.py"), "w") as f:
         f.write("# marker\n")
+    _write_plugin_manifest(plugin)
 
     return project, plugin, cache_base
 
@@ -364,6 +379,7 @@ class TestResolvePathsSymlink:
         os.makedirs(os.path.join(real_plugin, "pipeline"))
         with open(os.path.join(real_plugin, "pipeline", "haiku.py"), "w") as f:
             f.write("# marker\n")
+        _write_plugin_manifest(real_plugin)
 
         # Create project with symlinked .claude/remember -> real_plugin
         project = os.path.join(str(tmp_path), "my-project")
@@ -567,7 +583,7 @@ def _make_path_probe(plugin_dir: str, script_name: str) -> str:
     log_stub = os.path.join(plugin_dir, "scripts", "log.sh")
     if not os.path.exists(log_stub):
         with open(log_stub, "w") as f:
-            f.write('#!/bin/bash\nlog() { :; }\nlog_tokens() { :; }\n'
+            f.write('#!/bin/bash\nlog() { :; }\nlog_usage() { :; }\n'
                     'assign_kv() { :; }\nconfig() { echo "$2"; }\n'
                     'dispatch() { :; }\nrotate_logs() { :; }\n'
                     'REMEMBER_TZ="UTC"\n')
@@ -769,7 +785,8 @@ def _create_full_plugin_copy(plugin_dir: str) -> None:
     """Copy the entire real plugin into a test install location."""
     import shutil
     repo = os.path.join(os.path.dirname(__file__), "..")
-    for item in ("scripts", "pipeline", "prompts", "hooks", "hooks.d", "skills"):
+    for item in ("scripts", "pipeline", "prompts", "hooks", "hooks.d", "skills",
+                 ".claude-plugin"):
         src = os.path.join(repo, item)
         if os.path.isdir(src):
             shutil.copytree(
@@ -1363,7 +1380,8 @@ class TestWindowsCompatIssue11:
         """resolve-paths.sh contains the OSTYPE=msys|cygwin normalization block."""
         with open(os.path.join(REPO_ROOT, "scripts", "resolve-paths.sh")) as f:
             content = f.read()
-        assert 'msys|cygwin' in content, (
+        # An if/elif since #898 round 19 removed every shipped `case`.
+        assert '[ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]' in content, (
             "resolve-paths.sh missing the Git Bash / MSYS / Cygwin normalization case"
         )
         assert 'BASH_REMATCH' in content, (
@@ -1377,6 +1395,7 @@ class TestWindowsCompatIssue11:
         """All pipeline scripts source detect-tools.sh for python detection."""
         for script in ("save-session.sh", "run-consolidation.sh",
                         "post-tool-hook.sh", "session-start-hook.sh"):
+            skip_if_compiled(os.path.join(REPO_ROOT, "scripts", script))
             with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
                 content = f.read()
             assert "detect-tools.sh" in content, (
@@ -1481,6 +1500,8 @@ class TestWindowsCompatIssue11:
         """Hook scripts use $JQ, not hardcoded jq (except log.sh and detect-tools.sh)."""
         for script in ("save-session.sh", "run-consolidation.sh",
                         "post-tool-hook.sh", "session-start-hook.sh"):
+            # A compiled hook carries log.sh's text, which is exempt here.
+            skip_if_compiled(os.path.join(REPO_ROOT, "scripts", script))
             with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
                 for i, line in enumerate(f, 1):
                     if _line_has_hardcoded_jq(line):
@@ -1937,11 +1958,19 @@ class TestFreshProjectBootstrap:
         """If log.sh sources but does not define _remember_date, the hook must
         fail loudly (rc=127 + diagnostic), not silently produce an empty TODAY.
 
+        Premise: the hook loads log.sh FROM DISK at run time, so a broken
+        log.sh beside it is what it gets. A compiled hook (#900) carries
+        log.sh inside itself and never reads the file -- skipped there.
+
         Without the guard, the hook would call `_remember_date` (command not
         found, empty TODAY) and continue to exit 0 — a silent corruption. The
         guard converts that into an explicit, debuggable failure. rc=127 keeps
         it inside the degraded-env contract that tolerates (0, 127).
         """
+        skip_if_compiled(
+            os.path.join(REPO_ROOT, "scripts", "session-start-hook.sh"),
+            why="this test's premise is that the hook loads log.sh from disk "
+                "at run time, which a self-contained compiled hook never does")
         project = os.path.join(str(tmp_path), "project")
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
         os.makedirs(project)
@@ -2131,6 +2160,7 @@ class TestFreshProjectBootstrap:
         repo_root = os.path.join(os.path.dirname(__file__), "..")
         for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
             script_path = os.path.join(repo_root, "scripts", script_name)
+            skip_if_compiled(script_path)
             with open(script_path) as f:
                 content = f.read()
             assert "bootstrap-dirs.sh" in content, (
@@ -2194,6 +2224,7 @@ class TestFreshProjectBootstrap:
         repo_root = os.path.join(os.path.dirname(__file__), "..")
         for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
             script_path = os.path.join(repo_root, "scripts", script_name)
+            skip_if_compiled(script_path)
             with open(script_path) as f:
                 lines = f.read().splitlines()
             sourced = []
@@ -2587,6 +2618,11 @@ class TestMarketplacePathResolution:
             path = os.path.join(scripts_dir, hook)
             with open(path) as f:
                 content = f.read()
+            if is_compiled_text(content):
+                # #900 compiled CI leg: a compiled hook calls the function
+                # resolve-paths.sh became, by design -- its source (which
+                # this pins) is checked by the plain pytest job.
+                continue
             assert "resolve-paths.sh" in content, (
                 f"{hook} must source resolve-paths.sh for PIPELINE_DIR. "
                 f"Without it, marketplace installs read config from wrong path."
@@ -2624,6 +2660,12 @@ class TestMarketplacePathResolution:
             if not fname.endswith(".sh") or fname in exempt:
                 continue
             path = os.path.join(scripts_dir, fname)
+            with open(path) as f:
+                if is_compiled_text(f.read()):
+                    # #900 compiled CI leg: a compiled hook carries the exempt
+                    # libraries' own text; its source is checked by the plain
+                    # pytest job.
+                    continue
             with open(path) as f:
                 for lineno, line in enumerate(f, 1):
                     stripped = line.strip()

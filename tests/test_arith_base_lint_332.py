@@ -51,6 +51,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests._compiled_hooks import is_compiled_text
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SHELL_DIRS = ("scripts", "hooks.d")
@@ -59,6 +61,11 @@ SHELL_DIRS = ("scripts", "hooks.d")
 _DIGIT_ARM = re.compile(r"\*\[!0-9\]\*")
 # `case "$VAR" in`, `case $VAR in`, `case "${VAR}" in`.
 _CASE_HEAD = re.compile(r"\bcase\s+\"?\$\{?(\w+)\}?\"?\s+in\b")
+
+# The same guard as a test: `[[ "$X" == *[!0-9]* ]]` (#898 round 19 removed
+# every shipped `case`) or the earlier `[ "${X#*[!0-9]}" != "$X" ]`.
+_DIGIT_TEST = re.compile(
+    r"\$\{(\w+)#\*\[!0-9\]\}|\[\[ \"?\$\{?(\w+)\}?\"? == \*\[!0-9\]\* \]\]")
 
 # How far above a digit-rejecting arm the `case` head may sit. The single-line
 # form puts them on the same line; the block form in this repo spans two.
@@ -70,6 +77,7 @@ def _guarded_names(text: str) -> set:
     lines = text.splitlines()
     names = set()
     for i, line in enumerate(lines):
+        names.update(n for pair in _DIGIT_TEST.findall(line) for n in pair if n)
         if not _DIGIT_ARM.search(line):
             continue
         for j in range(i, max(-1, i - _CASE_LOOKBACK) - 1, -1):
@@ -138,6 +146,31 @@ def _shell_files():
         yield from sorted((REPO_ROOT / directory).rglob("*.sh"))
 
 
+def _sweep(paths):
+    """One `path:line  $name  in  span` row per finding across PATHS.
+
+    A compiled hook (#900) is skipped: it is a dozen libraries in one file, so
+    a name guarded in one function would flag an unrelated use of the same
+    name in another -- and every file it was compiled from is swept as source
+    by the plain pytest job on every leg (tests/test_compiled_hook_pins_900.py).
+    """
+    offenders = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if is_compiled_text(text):
+            continue
+        names = _guarded_names(text)
+        if not names:
+            continue
+        for line, name, span in _unbased_uses(text, names):
+            try:
+                rel = path.relative_to(REPO_ROOT)
+            except ValueError:
+                rel = path
+            offenders.append(f"  {rel}:{line}  ${name}  in  {span}")
+    return offenders
+
+
 def test_no_case_guarded_value_reaches_arithmetic_without_a_radix():
     """The sweep. One finding fails the build and names file, line and variable.
 
@@ -146,15 +179,7 @@ def test_no_case_guarded_value_reaches_arithmetic_without_a_radix():
     on an empty string is itself an error on bash 5, and the `case` is also what
     rejects a space-padded value that arithmetic would otherwise accept.
     """
-    offenders = []
-    for path in _shell_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        names = _guarded_names(text)
-        if not names:
-            continue
-        for line, name, span in _unbased_uses(text, names):
-            rel = path.relative_to(REPO_ROOT)
-            offenders.append(f"  {rel}:{line}  ${name}  in  {span}")
+    offenders = _sweep(_shell_files())
 
     assert not offenders, (
         "a value guarded by a digits-only `case` reaches `$(( ))` with no "
@@ -182,6 +207,22 @@ def test_the_detector_finds_a_planted_instance():
     assert names == {"LAST"}, names
     found = _unbased_uses(planted, names)
     assert [f[1] for f in found] == ["LAST"], found
+
+
+TEST_FORM_GUARD = (
+    'LAST=$(cat "$f")\n'
+    'if [ -z "$LAST" ] || [[ "$LAST" == *[!0-9]* ]]; then LAST=0; fi\n'
+)
+
+
+def test_the_detector_finds_the_test_form_guard():
+    """#898 round 19: the guard is a `[ ]` test now that no shipped script
+    carries a `case`; the detector must still see it, and still accept 10#."""
+    planted = TEST_FORM_GUARD + "ELAPSED=$(( $(date +%s) - LAST ))\n"
+    assert _guarded_names(planted) == {"LAST"}
+    assert [f[1] for f in _unbased_uses(planted, {"LAST"})] == ["LAST"]
+    fixed = TEST_FORM_GUARD + "ELAPSED=$(( $(date +%s) - 10#$LAST ))\n"
+    assert _unbased_uses(fixed, _guarded_names(fixed)) == []
 
 
 def test_the_detector_finds_it_through_the_dollar_form_too():
