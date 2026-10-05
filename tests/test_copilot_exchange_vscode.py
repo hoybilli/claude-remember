@@ -109,13 +109,38 @@ def test_oversized_string_arguments_render_bounded_without_decoding():
 
 
 def test_deeply_nested_string_arguments_under_the_size_cap_do_not_raise():
-    """Under the size cap but past the decoder's recursion limit: the
-    RecursionError is caught and the raw string rendered, truncated."""
+    """Under the size cap but past the decoder's recursion limit. Depending on
+    the Python version the decoder raises either `RecursionError` (3.9, 3.14.4)
+    or `JSONDecodeError` (3.14.7); both outcomes are acceptable, so this pins
+    only the contract that holds on every version: no exception, and a bounded
+    `[TOOL: edit...]` line. Each branch is pinned deterministically below."""
     deep = "[" * 60_000
     assert len(deep) <= _host._COPILOT_ARGS_DECODE_MAX
     line = _host._format_copilot_tool_request({"name": "edit", "arguments": deep})
-    assert line.startswith("[TOOL: edit ")
+    assert line.startswith("[TOOL: edit")
     assert len(line) < 200
+
+
+def test_recursion_error_from_the_decoder_renders_the_raw_string_truncated(monkeypatch):
+    """Interpreter-independent: the decoder is made to raise RecursionError."""
+    def boom(_s):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(_host.json, "loads", boom)
+    raw = "[" * 1000
+    line = _host._format_copilot_tool_request({"name": "edit", "arguments": raw})
+    assert line == f"[TOOL: edit `{raw[:80]}`]"
+    assert line.startswith("[TOOL: edit `")
+    assert raw[:80] in line
+
+
+def test_json_decode_error_from_the_decoder_renders_no_detail(monkeypatch):
+    """Positive control for the test above: a JSONDecodeError takes the other
+    branch, and the result is exactly the bare `[TOOL: edit]`."""
+    def boom(_s):
+        raise json.JSONDecodeError("x", "", 0)
+    monkeypatch.setattr(_host.json, "loads", boom)
+    line = _host._format_copilot_tool_request({"name": "edit", "arguments": "[" * 1000})
+    assert line == "[TOOL: edit]"
 
 
 def test_a_poison_tool_line_does_not_stop_extraction(tmp_path):
