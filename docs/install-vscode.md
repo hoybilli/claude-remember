@@ -17,13 +17,13 @@ On macOS the hooks run with plain bash. On Windows each goes through a PowerShel
 - **Desktop app:** the local marketplace below, installed with the `copilot` CLI. On Windows the hooks ran and saves were made, but the plugin never appeared under Installed.
 - `copilot plugin install Digital-Process-Tools/claude-remember` should also work (reasoned, not tried).
 
-**Local marketplace** (observed on macOS, desktop app install). Copy the plugin into `<marketplace dir>/remember/` and list it in a `marketplace.json` like this one:
+**Local marketplace** (observed on macOS, desktop app install). Copy the plugin into `<marketplace dir>/remember/` and list it in `<marketplace dir>/.claude-plugin/marketplace.json`:
 
 ```json
 {"name": "remember-local", "owner": {"name": "local"}, "plugins": [{"name": "remember", "source": "./remember"}]}
 ```
 
-Then run `copilot plugin marketplace add <marketplace dir>` and `copilot plugin install remember@remember-local`. The `source` must be relative: `copilot plugin install` rejects an absolute path with `Plugin path escapes marketplace directory` (observed on macOS).
+Then run `copilot plugin marketplace add <marketplace dir>` (it prints `Marketplace "remember-local" added successfully.`; observed on macOS) and `copilot plugin install remember@remember-local`. The `source` must be relative: `copilot plugin install` rejects an absolute path with `Plugin path escapes marketplace directory` (observed on macOS).
 
 ## Removing it
 
