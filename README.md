@@ -91,6 +91,10 @@ Observed working against `agy` 1.1.27: capture was driven end to end against a r
 
 **One gap, before you choose this host:** of the four Antigravity events confirmed to fire, none is a process-exit signal, so there is no analogue of `SessionEnd` and no last-chance flush at the end of a conversation. `Stop` fires after every turn and is deliberately not wired to `session-end-hook.sh`. What that costs, the name-keyed schema whose parse failures are silent, and the three live defects found while porting: [docs/install-antigravity.md](docs/install-antigravity.md).
 
+**VS Code Agents, the Copilot CLI and the Copilot desktop app**
+
+Observed on Windows 11 and macOS 27: hooks fire in all three hosts, and saves run (for the CLI, recorded on macOS only). Install, the saving behaviour to choose, troubleshooting and removal: [docs/install-vscode.md](docs/install-vscode.md).
+
 ## Requirements
 
 - Python 3.9+
@@ -218,6 +222,7 @@ Everything that used to sit on this page and did not need to be read before inst
 - [Installing under Claude Code](docs/install-claude-code.md): updates, the official marketplace, manual install, checking your version
 - [Installing under Codex](docs/install-codex.md)
 - [Installing under Antigravity CLI](docs/install-antigravity.md)
+- [Installing under VS Code Agents / GitHub Copilot](docs/install-vscode.md)
 - [Windows](docs/windows.md)
 - [Hooks](docs/hooks.md)
 - [Diagnostics](docs/diagnostics.md)

@@ -1,71 +1,94 @@
 # Installing under VS Code Agents, the Copilot CLI and the Copilot desktop app
 
-Evidence: [vscode-verification.md](vscode-verification.md).
-
 ## What works
 
-VS Code Agents, the Copilot CLI and the Copilot desktop app run one Copilot harness and load this plugin's Claude-format manifest. All three were **observed** on Windows 11 (Git Bash, Windows PowerShell 5.1) and macOS 27 (Apple silicon, stock bash 3.2): hooks fire, the recap is injected at SessionStart, the Copilot transcript is read and saves run. Two of these were not recorded on Windows, though they were observed on macOS: the desktop app's recap and the CLI's transcript read. Linux hosts are unverified (only the test suite ran there).
+**Observed on Windows 11 and macOS 27 in all three hosts:** the hooks fire, the memory recap is injected when a chat starts, and turns are saved into the project's `.remember/`, which is shared with Claude Code. Not recorded on Windows, though observed on macOS: the desktop app's recap, and the CLI's transcript read and saves. Linux: not tried (only the test suite ran there).
 
-The transcript is read from `~/.copilot/session-state/<uuid>/events.jsonl`; saves go into the project's `.remember/`, shared with Claude Code.
-
-On macOS the hooks run with plain bash. On Windows each goes through a PowerShell launcher, `scripts/run-hook.ps1`, that finds Git Bash: one extra process per hook, with `-ExecutionPolicy Bypass` for that process ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
-
-## Install
-
-- **VS Code:** in your user `settings.json`, set `"chat.pluginLocations": {"<absolute path to the plugin>": true}` (on Windows, double each backslash: `C:\\tools\\remember`), then run **Developer: Reload Window** and open a **New Chat**; the plugin syncs on that first chat, not on the reload (observed on macOS). Register a copy without `.git/`, such as a `git archive` export, as every observed run did; on macOS a git checkout can fail to sync (see Troubleshooting). VS Code does not re-copy a registered folder, so to update, register the new version under a new path.
-- **Copilot CLI:** `copilot --plugin-dir <plugin directory>`, or the local marketplace below.
-- **Desktop app:** the local marketplace below, installed with the `copilot` CLI. On Windows the hooks ran and saves were made, but the plugin never appeared under Installed.
-- `copilot plugin install Digital-Process-Tools/claude-remember` should also work (reasoned, not tried).
-
-**Local marketplace** (observed on macOS, desktop app install). Copy the plugin into `<marketplace dir>/remember/` and list it in `<marketplace dir>/.claude-plugin/marketplace.json`:
-
-```json
-{"name": "remember-local", "owner": {"name": "local"}, "plugins": [{"name": "remember", "source": "./remember"}]}
-```
-
-Then run `copilot plugin marketplace add <marketplace dir>` (it prints `Marketplace "remember-local" added successfully.`; observed on macOS) and `copilot plugin install remember@remember-local`. The `source` must be relative: `copilot plugin install` rejects an absolute path with `Plugin path escapes marketplace directory` (observed on macOS).
-
-## Removing it
-
-- **CLI and desktop app** (observed on macOS): `copilot plugin uninstall remember@remember-local` only disables a local-marketplace plugin; then run `copilot plugin marketplace remove remember-local`. `~/.copilot/settings.json` may keep an inert `"remember@remember-local": false` (that leftover was observed on Windows and macOS); delete that key by hand if you like.
-- **VS Code:** remove the path from `chat.pluginLocations` (not tried).
+Versions run: VS Code 1.140.0 (macOS; 1.139.1 to 1.140.0 on Windows), Copilot CLI 1.0.92-3 (Windows) and 1.0.91 (macOS), desktop app 1.1.26 (macOS).
 
 ## Requirements
 
 - Bash: Git for Windows on Windows ([windows.md](windows.md)); stock bash on macOS.
 - Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it).
 - `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). Without it nothing is injected in VS Code or the CLI; `.remember/logs/memory-<date>.log` says so.
-- Claude Code's `claude` CLI on `PATH`, signed in: every save is a `claude -p` call billed to your Claude account, not to Copilot (billing: reasoned).
+- Claude Code's `claude` CLI on `PATH`, signed in: saves with new content, and a daily consolidation, are `claude -p` calls billed to your Claude account, not to Copilot (billing: reasoned).
+- The `copilot` CLI, for desktop app installs.
+- On Windows each hook starts through a small PowerShell launcher (`-ExecutionPolicy Bypass` for that one process); the live Windows runs used an earlier form of it, and the shipped form has run only in tests ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
+
+## Install
+
+First get a copy without `.git/`, as every successful VS Code run did; on macOS a git checkout can fail to sync (see Troubleshooting). In a terminal (Git Bash on Windows):
+
+```
+git clone https://github.com/Digital-Process-Tools/claude-remember.git
+mkdir -p <plugin dir>
+git -C claude-remember archive HEAD | tar -x -C <plugin dir>
+```
+
+**VS Code**
+
+1. Run **Preferences: Open User Settings (JSON)** and add `"chat.pluginLocations": {"<plugin dir>": true}` (absolute path). On Windows, double each backslash: `C:\\tools\\remember`.
+2. Run **Developer: Reload Window**, then open a **New Chat**. The plugin syncs on that first chat, not on the reload (observed on macOS).
+3. To update, export the new version to a new folder and register that path instead: VS Code does not re-copy a registered folder.
+
+**Copilot CLI:** `copilot --plugin-dir <plugin dir>`, or the local marketplace below. End sessions with `/exit`.
+
+**Desktop app:** install through the local marketplace below with the `copilot` CLI, then start a new chat **with a Project attached**. Without one, memory goes under `~/.copilot/chats/<date>/<slug>/`, not your project (observed on Windows). On Windows the plugin never appeared under Installed, although its hooks ran and saved; use [Check it works](#check-it-works) instead.
+
+**Local marketplace** (used for the desktop app on both platforms and for the CLI on Windows; the file and messages below are from macOS):
+
+```
+mkdir -p <marketplace dir>/.claude-plugin <marketplace dir>/remember
+git -C claude-remember archive HEAD | tar -x -C <marketplace dir>/remember
+```
+
+Put this in `<marketplace dir>/.claude-plugin/marketplace.json`:
+
+```json
+{"name": "remember-local", "owner": {"name": "local"}, "plugins": [{"name": "remember", "source": "./remember"}]}
+```
+
+Then run `copilot plugin marketplace add <marketplace dir>` (it prints `Marketplace "remember-local" added successfully.`) and `copilot plugin install remember@remember-local`. The `source` must be relative: an absolute path is rejected with `Plugin path escapes marketplace directory`.
+
+**From GitHub:** `copilot plugin install Digital-Process-Tools/claude-remember` (landing path seen on Windows with an earlier version; not tried with this port).
+
+## Check it works
+
+After a first turn (in the CLI, after `/exit`), run `bash <plugin dir>/scripts/doctor.sh` (marketplace installs: `<marketplace dir>/remember`) from the project folder (Git Bash on Windows; needs `jq`). Expect `OK   last save came from a VS Code Agents / Copilot session` and `VERDICT: capture is working` (observed on macOS). On a project never opened in Claude Code, `FAIL Session dir MISSING` is expected. Any other `VERDICT: problem …` line names a real problem.
 
 ## How saving works here
 
-- **VS Code Agents** (observed on Windows and macOS) and **the desktop app** (observed on macOS) send `SessionEnd` (`reason=complete`) after every turn, and a background save runs each time. VS Code sends nothing on close (observed on Windows), so this is the only save when a turn ends; PostToolUse saves run mid-turn once enough new transcript accumulates.
-- **The Copilot CLI** sends `SessionEnd` once, on `/exit` (`reason=user_exit`), and saves then (observed on macOS). Closing it without `/exit` (a killed terminal; other exits not tried) would lose turns no PostToolUse save caught (reasoned).
+- **VS Code Agents and the desktop app save after every turn**, in the background (observed: VS Code on Windows and macOS, the desktop app on macOS). Closing VS Code triggers no further save (observed on Windows).
+- **The Copilot CLI saves once, when you type `/exit`** (observed on macOS). End sessions with `/exit`. Closing it any other way, such as killing the terminal, would probably send no `SessionEnd` and lose turns no mid-session save caught (reasoned, not tried).
 
-In VS Code Agents and the desktop app, `cooldowns.turn_end_debounce_seconds` ([configuration.md](configuration.md)) chooses between two behaviours; it has no effect in the CLI, which saves once on `/exit`, or outside Copilot.
+In VS Code Agents, and in the desktop app (reasoned: it sends `complete` per turn on macOS), `cooldowns.turn_end_debounce_seconds` ([configuration.md](configuration.md)) chooses between two behaviours. It had no effect in the CLI run on macOS, which saved once on `/exit` (the Windows CLI's reason was not recorded).
 
 **A. Immediate (default, `0`).** Each turn is saved at once: one summarizer call per turn with new content (observed $0.0043-$0.0070 per call in VS Code on Windows and macOS), and a loss window of seconds.
 
-**B. Debounced (`N` > 0).** A turn's save waits `N` seconds; if another turn ends first, the wait restarts (observed live in VS Code on Windows). A burst of turns costs one summarizer call, `N` seconds after the last turn. The risk (reasoned, not tested): if the waiting save is ended inside those `N` seconds (a shutdown, or a host that takes its hooks' background processes down with it), the burst can go unsaved, unless the session has a later turn. Put `{"cooldowns": {"turn_end_debounce_seconds": 30}}` in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project).
+**B. Debounced (`N` > 0).** A turn's save waits `N` seconds; if another turn ends first, the wait restarts (observed live in VS Code on Windows). A burst of turns costs one summarizer call, `N` seconds after the last turn. To turn it on, put `{"cooldowns": {"turn_end_debounce_seconds": 30}}` in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project). The risk (reasoned, not tested): if the waiting save is ended inside those `N` seconds (a shutdown, or a host that takes its hooks' background processes down with it), the burst can go unsaved, unless the session has a later turn.
 
-The log says `turn-end save deferred Ns` when a save is scheduled and `turn-end save superseded by a later turn` when one stands down. `N` is whole seconds: above 3600 it is used as 3600; ten or more digits, or anything that is not a whole number, counts as `0`. To turn it off, set the key back to `0` or remove it.
+Keep A unless a summarizer call per turn costs more than you want. Use a whole number from 0 to 3600; anything else is capped at 3600 or ignored ([configuration.md](configuration.md)). The project's `.remember/logs/memory-<date>.log` says `turn-end save deferred Ns` when a save is scheduled and `turn-end save superseded by a later turn` when one stands down. To turn it off, set the key back to `0` or remove it.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Nothing injected at SessionStart | No `jq`; or the host was started from a terminal inside Claude Code, so the plugin prints plain text as for Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install `jq`; start the host from a terminal outside Claude Code |
-| VS Code on macOS shows nothing from the plugin; `agenthost.log` (VS Code's log folder) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: the mirror copy cannot open that socket in `.git/` and the sync aborts (observed on macOS) | Register a copy without `.git/` (observed), or turn `core.fsmonitor` off and stop its daemon (not tried); register under a new path |
-| `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows, or set `REMEMBER_BASH` to `bash.exe` |
-| `bash <plugin>/scripts/doctor.sh`, run in the project, prints `FAIL Session dir MISSING` | Expected: Claude Code's transcript folder never exists on a Copilot-only project | None needed if it also prints `OK   last save came from a VS Code Agents / Copilot session` and the verdict `capture is working` or a summarizer verdict (needs `jq`) |
-| VS Code shows SessionStart `success=false`, or the CLI shows no recap | Another plugin's hook failed: VS Code still injects this plugin's context; the CLI drops the batch's output (observed on Windows) | Fix the other plugin |
-| The desktop app saved into `~/.copilot/chats/<date>/<slug>/.remember` | No Project was attached (observed on Windows) | Attach a Project |
+| The assistant shows no memory of earlier sessions | No `jq`; or the host was started from a terminal inside Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install `jq`; start the host from a terminal outside Claude Code |
+| VS Code on macOS shows nothing from the plugin; its log (run **Developer: Open Logs Folder**; the file is `agenthost.log`) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: VS Code cannot copy its `.git/` socket and the sync aborts (observed on macOS) | Register a copy without `.git/` (observed), or run `git config core.fsmonitor false` and `git fsmonitor--daemon stop` in the checkout (not tried); register under a new path |
+| `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows. If `bash.exe` is elsewhere, set the user environment variable `REMEMBER_BASH` to its full path (for example `D:\Git\bin\bash.exe`) and restart the host (reasoned) |
+| The CLI shows no recap | Another plugin's hook failed in the same batch; the CLI drops the batch's output (observed on Windows) | Fix the other plugin |
+
+## Removing it
+
+- **CLI and desktop app** (observed on macOS): `copilot plugin uninstall remember@remember-local` only disables a local-marketplace plugin; then run `copilot plugin marketplace remove remember-local`. The files in `<marketplace dir>` stay; delete them by hand. `~/.copilot/settings.json` may keep an inert `"remember@remember-local": false` (observed on Windows and macOS); you can delete that key. With `--plugin-dir`, stop passing the flag.
+- **VS Code:** remove the path from `chat.pluginLocations` and reload the window (not tried).
+- Each project's `.remember/` stays, shared with Claude Code.
 
 ## Limitations
 
 Open questions and follow-ups are in [the record](vscode-verification.md#coverage-gaps-and-follow-ups).
 
-- The per-prompt time stamp (`prompt_stamp`, Claude Code's `[14:30 CEST -- user]` line) is not injected on these hosts.
-- Under Constrained Language Mode (AppLocker or WDAC, Windows) the host waits for each save (shown in a test that sets the language mode in process, not under a real policy).
-- An execution policy enforced by Group Policy blocks the Windows launcher (not observed).
+- The per-prompt time stamp (`prompt_stamp`, Claude Code's `[14:30 CEST -- user]` line) is not injected on these hosts (observed in VS Code and the CLI; reasoned for the desktop app).
+- On Windows machines locked down with AppLocker or WDAC (Constrained Language Mode), the launcher cannot detach the save, so each turn waits for it (reasoned; the launcher's CLM path ran only in a test that set the mode in process).
+- An execution policy set by Group Policy overrides the launcher's `-ExecutionPolicy Bypass`; if it is `Restricted` or `AllSigned`, the unsigned launcher is blocked (reasoned, not observed). Check with `Get-ExecutionPolicy -List` in PowerShell; a `MachinePolicy` or `UserPolicy` value applies.
 - On a project also used from Claude Code, a Copilot save can make `doctor.sh` say `capture is working` while Claude Code's capture is broken; only the `FAIL` line hints at it (reasoned).
