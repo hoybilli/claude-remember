@@ -6,8 +6,8 @@ The evidence behind [install-vscode.md](install-vscode.md). Each claim names the
 
 Three hosts run the same Copilot harness and load this plugin from its Claude-format manifest: VS Code Agents, the Copilot CLI and the GitHub Copilot desktop app.
 
-- **Windows:** all three were run on Windows 11 with Git for Windows bash 5.2.37 and Windows PowerShell 5.1, on 2026-09-30 (VS Code only) and 2026-10-03: Copilot CLI 1.0.92-3 (a prerelease) and the desktop app at runtime `copilotVersion 0.0.0` (the app's own version was not determined). VS Code version: the 2026-09-30 entry.
-- **macOS:** all three were run on 2026-10-04 on macOS 27.0.1, arm64 (Apple silicon), with the stock `/bin/bash` 3.2.57: VS Code 1.140.0, Copilot CLI 1.0.91 (the latest stable release) and the desktop app 1.1.26 (runtime `copilotVersion 0.0.0`).
+- **Windows:** all three were run on Windows 11 on 2026-09-30 (VS Code only) and 2026-10-03.
+- **macOS:** all three were run on 2026-10-04 on macOS 27.0.1, arm64 (Apple silicon).
 - **Linux:** no host was run; the test suite was, as it was on macOS and Windows.
 
 Labels:
@@ -17,6 +17,21 @@ Labels:
 - **Reasoned**: derived from the code or documentation, not seen.
 - **Read from the code**: a reasoned claim about this repo's own scripts, checked against the source, not against a run.
 - **Not observed**: not tried; any claim rests on reasoning or documentation.
+
+### Versions
+
+Read on 2026-10-04; the app reports runtime `copilotVersion 0.0.0`.
+
+| Component | Windows 11 | macOS 27.0.1 |
+| --- | --- | --- |
+| VS Code | 1.139.1 at the 2026-09-30 probes, 1.140.0 after reloads (observed); 1.140.0 for 2026-10-03 (reasoned: installed 2026-09-30, unchanged since) | 1.140.0 (observed) |
+| Copilot Chat | 0.68.0 for 2026-10-03 (reasoned: ships in VS Code 1.140.0) | 0.68.0 (observed after the run) |
+| Copilot CLI | 1.0.92-3, prerelease (observed) | 1.0.91, stable (observed) |
+| Desktop app | 1.1.26 (reasoned: installed 2026-10-03; later auto-update not excluded) | 1.1.26 (observed) |
+| `claude` CLI | 2.1.284 (reasoned: version on 2026-10-04) | 2.1.284 (observed after the runs) |
+| jq | 1.8.2 (installed 2026-09-28) | 1.7.1 |
+| git, bash | Git for Windows 2.53.0.2, bash 5.2.37; PowerShell 5.1 | git 2.54.0, `/bin/bash` 3.2.57 |
+| Python | 3.14.4 | Hooks log only `PYTHON=python3`: Homebrew's 3.14.7 in a login shell. The GUI hosts' PATH was not observed, so possibly `/usr/bin/python3` 3.9.6. Both passed |
 
 This repo has no issue number for this port yet; tests and fixtures carry the placeholder token `vscode` in their names (`tests/test_*_vscode.py`, `tests/fixtures/vscode-*`).
 
@@ -118,7 +133,7 @@ The live Windows runs used earlier forms of the entry (2026-09-30: `& "…\run-h
 
 ### 2026-09-30: VS Code Agents, first live runs
 
-**Observed** on Windows 11: three agent sessions against an existing project that already had a `.remember/` written by Claude Code. The plugin was a `git archive` export (LF line endings) of commit 39d1610, registered through `chat.pluginLocations` and a window reload. Its `powershell` entries used the earlier `& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" <name>.sh` form; the `-File` form was not used in these sessions. The probes of that day dumped the environment and stdin from inside firing plugin hooks, so what they report was seen, not only reasoned from documentation. VS Code version: the probes were recorded against 1.139.1, and `code --version` reported 1.140.0 on 2026-09-30 after the window reloads; the version was not re-recorded for the 2026-10-03 runs, and the running window's version was never confirmed.
+**Observed** on Windows 11: three agent sessions against an existing project that already had a `.remember/` written by Claude Code. The plugin was a `git archive` export (LF line endings) of commit 39d1610, registered through `chat.pluginLocations` and a window reload. Its `powershell` entries used the earlier `& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" <name>.sh` form; the `-File` form was not used in these sessions. The probes of that day dumped the environment and stdin from inside firing plugin hooks, so what they report was seen, not only reasoned from documentation. The probes ran against 1.139.1 ([Versions](#versions)).
 
 | Event | Fired | Notes |
 | --- | --- | --- |
@@ -159,7 +174,7 @@ The fix was first shown in the test harness -- the real `scripts/session-end-hoo
 
 ### 2026-10-03: Copilot CLI
 
-**Observed** on Windows 11 with Copilot CLI 1.0.92-3, the plugin loaded with `--plugin-dir` and, separately, from a local directory marketplace:
+**Observed** on Windows 11, the plugin loaded with `--plugin-dir` and, separately, from a local directory marketplace:
 
 - The hooks ran through `scripts/run-hook.ps1` straight from that directory. SessionStart took 2.6-2.7 s and SessionEnd 0.8 s. The recap was injected: the model listed the memory files.
 - A probe hook emitting several shapes showed that the CLI injects a top-level `additionalContext` for SessionStart **and** for UserPromptSubmit (VS Code does not for the latter); `hookSpecificOutput.additionalContext` and plain text were not injected.
@@ -171,7 +186,7 @@ The fix was first shown in the test harness -- the real `scripts/session-end-hoo
 
 ### 2026-10-04: macOS (VS Code Agents, Copilot CLI, desktop app)
 
-**Observed** unless marked, on the Mac in [Scope and labels](#scope-and-labels): `jq` 1.7.1 at `/usr/bin/jq` (ships with macOS); Python 3.9.6 (Apple, `/usr/bin/python3`) and 3.14.7 (Homebrew); the CLI from the Homebrew cask; the desktop app's version from `CFBundleShortVersionString`. Launch path and durations are in [the macOS table](#on-macos-27); mirror, sync, UserPromptSubmit and payload keys under "What the hosts send".
+**Observed** unless marked, on the Mac ([Versions](#versions)). Launch path and durations are in [the macOS table](#on-macos-27); mirror, sync, UserPromptSubmit and payload keys under "What the hosts send".
 
 Every macOS live run used commit c981dde: the CLI's first run used `--plugin-dir` pointed at a git checkout at c981dde; VS Code (after the failed sync from that checkout), the CLI's second run and the desktop app used a `git archive` export of c981dde. So the shell and pipeline code changed after the last Windows live run (b40bf48: e629250, a6953ae, 443b698) ran live on macOS; the later Windows launcher changes did not (see [How hooks are launched on Windows](#how-hooks-are-launched-on-windows)).
 
@@ -185,9 +200,9 @@ VS Code's mirror copies the whole registered folder, `.git/` included. With `cor
 
 **VS Code Agents, registered from a `git archive` export: full pass**, three sessions. SessionStart injected a top-level `additionalContext` of 546 characters each time; in session 1 the model named the memory files (as reported by the user). SessionStart's hook records come after the first UserPromptSubmit's; the recap was still injected. PostToolUse logged `post-tool: copilot transcript ~/.copilot/session-state/<uuid>/events.jsonl`. `SessionEnd` came with `reason=complete` after **every** turn (four turns), and a forced save ran each time (three `SKIP`s from the summarizer, one entry). `hook-errors.log` empty; no stray processes.
 
-**Copilot CLI 1.0.91**, `copilot --plugin-dir <dir>` started from a plain Terminal (not inside Claude Code); two sessions, full pass. SessionStart's top-level `additionalContext` was 388 and 629 characters. A two-turn session sent a single `SessionEnd`, on `/exit`, with `reason=user_exit`, not one per turn; the forced save ran then and wrote an entry. So `cooldowns.turn_end_debounce_seconds`, which acts only on `reason=complete` (read from the code), does not apply to this `/exit` save. (A session ended without `/exit`: see the gaps.)
+**Copilot CLI**, `copilot --plugin-dir <dir>` started from a plain Terminal (not inside Claude Code); two sessions, full pass. SessionStart's top-level `additionalContext` was 388 and 629 characters. A two-turn session sent a single `SessionEnd`, on `/exit`, with `reason=user_exit`, not one per turn; the forced save ran then and wrote an entry. So `cooldowns.turn_end_debounce_seconds`, which acts only on `reason=complete` (read from the code), does not apply to this `/exit` save. (A session ended without `/exit`: see the gaps.)
 
-**Copilot desktop app 1.1.26**, through a temporary local directory marketplace: the manifest at `<marketplace dir>/.claude-plugin/marketplace.json`; `copilot plugin marketplace add <marketplace dir>` printed `Marketplace "remember-local" added successfully.`; then `copilot plugin install remember@remember-local`.
+**Copilot desktop app**, through a temporary local directory marketplace: the manifest at `<marketplace dir>/.claude-plugin/marketplace.json`; `copilot plugin marketplace add <marketplace dir>` printed `Marketplace "remember-local" added successfully.`; then `copilot plugin install remember@remember-local`.
 
 - **An absolute plugin `source` in `marketplace.json` is rejected** by `copilot plugin install` with `Plugin path escapes marketplace directory: <path>`, and the failed install leaves a disabled "live plugin" entry behind. A relative `"source": "./remember"`, with the plugin copied inside the marketplace directory, installs ("loaded live … nothing was copied"). `~/.copilot/settings.json` did not exist before the install; the install created it.
 - One new chat with a Project attached, two turns: a top-level `additionalContext` of 679 characters, and the model **named the memory files**; **`SessionEnd` with `reason=complete` after every turn**; a save per turn (one `SKIP`, one entry). `hook-errors.log` empty; no stray processes.
@@ -232,13 +247,12 @@ Gaps (the limitations a user needs are in [install-vscode.md](install-vscode.md#
 - **Byte budget (#842).** Upstream's total SessionStart budget (`thresholds.session_start_max_bytes`, default 9,000 bytes) is measured on the plain-text recap's handoff and memory sections, before the copilot envelope wraps the recap; JSON escaping can make the injected string somewhat longer (**reasoned** from the code; the recaps in the Windows d54685c and 3311c67 runs were under it).
 - **Promos.** Promos (`systemMessage`) are not emitted under the copilot hint (all three hosts); the emit branch skips them on purpose, as `systemMessage` was not probed (read from the code). The promo-on pair in `tests/test_session_start_copilot_stdout_vscode.py` pins the skip (see the macOS suite section). No live run shows it.
 - **Per-hook startup cost.** On Windows each hook starts one extra Windows PowerShell process. In the test harness on one machine a trivial hook took about 0.5 s through the launcher alone (0.36 s before the handle step) and about 0.2 s more in the full manifest form (**observed** there, not measured in VS Code).
-- **CLI session ended without `/exit`.** No other way of ending a CLI session than `/exit` was tried (macOS, CLI 1.0.91). One that sends no `SessionEnd`, such as a killed terminal, would leave its turns since the last PostToolUse delta save unsaved (**reasoned**, not tested). The CLI's `SessionEnd` reason on Windows (CLI 1.0.92-3) was not recorded.
+- **CLI session ended without `/exit`.** No other way of ending a CLI session than `/exit` was tried. One that sends no `SessionEnd`, such as a killed terminal, would leave its turns since the last PostToolUse delta save unsaved (**reasoned**, not tested). The CLI's `SessionEnd` reason on Windows was not recorded.
 - **Doctor on a mixed project.** When the last save came from a Copilot session, doctor reads `capture is working` even if the project's Claude Code slug is genuinely mismatched (#144): the Copilot transcript satisfies the same guard a present Claude Code session dir would, and only the earlier `FAIL Session dir MISSING` line hints otherwise (**reasoned** from the code, not observed).
 - **Gemini hint.** Gemini CLI has no signature in `pipeline/host.REGISTRY`, so a Gemini session launched from a shell that exports `COPILOT_CLI` would get the copilot hint, and its recap the copilot envelope (**reasoned**, not observed).
+- **Windows versions, 2026-10-03.** VS Code and desktop app are reasoned from install records, not printed during the run.
 
 Proposed follow-ups (none done in this port):
-
-- **Version.** Record the running VS Code window's version in the next Windows run.
 - **UserPromptSubmit.** `scripts/user-prompt-hook.sh` does not compute the copilot hint and switches on `CLAUDE_PROJECT_DIR`, which VS Code and the CLI set (observed on Windows), so it takes the plain-stdout branch. A fix needs the hook to resolve the hint, branch ahead of that switch, and emit a top-level `additionalContext` (the CLI did not inject the `hookSpecificOutput` shape its other branch emits), keeping the exit-0, never-block rule and weighing the cost on its fast path (#227). Evidence: on macOS the hook printed its plain-text stamp and no host recorded it (see "UserPromptSubmit stdout").
 - **Doctor.** The masking above is also what spares a Copilot-only project the false #144 verdict, so a sound fix needs evidence that the project is also used from Claude Code, such as a prior Claude Code save; doctor records none today.
 - **Gemini.** Capture a live hook-environment dump first (`pipeline/host.py` takes signatures from one; none exists for Gemini), then add the signature to `pipeline/host.REGISTRY` ahead of `COPILOT` and, in the same commit, to the hand-kept list in `scripts/lib-session-id.sh` that chooses the shell hint.

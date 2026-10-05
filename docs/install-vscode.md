@@ -4,7 +4,7 @@
 
 **Observed on Windows 11 and macOS 27 in all three hosts:** the hooks fire, the memory recap is injected when a chat starts, and turns are saved into the project's `.remember/`, which is shared with Claude Code. Not recorded on Windows, though observed on macOS: the desktop app's recap, and the CLI's transcript read and saves. Linux: not tried (only the test suite ran there).
 
-Versions run: VS Code 1.140.0 (macOS; 1.139.1 to 1.140.0 on Windows), Copilot CLI 1.0.92-3 (Windows) and 1.0.91 (macOS), desktop app 1.1.26 (macOS).
+Versions run: VS Code 1.140.0 with Copilot Chat 0.68.0, Copilot CLI 1.0.92-3 (Windows) and 1.0.91 (macOS), desktop app 1.1.26, `claude` CLI 2.1.284 ([details](vscode-verification.md#versions)).
 
 ## Requirements
 
