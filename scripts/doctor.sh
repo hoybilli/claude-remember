@@ -355,7 +355,15 @@ else
     echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
-_DOCTOR_COPILOT_DIR="${COPILOT_HOME:-${HOME:-}/.copilot}/session-state"
+# COPILOT_HOME when non-empty, else $HOME/.copilot -- the same base
+# lib-session-id.sh resolves (an explicit if/else: v0.40.0's release-tree
+# checker refuses a nested default expansion). Inline, because the library is
+# only sourced further down, and only conditionally.
+if [ -n "${COPILOT_HOME:-}" ]; then
+    _DOCTOR_COPILOT_DIR="$COPILOT_HOME/session-state"
+else
+    _DOCTOR_COPILOT_DIR="${HOME:-}/.copilot/session-state"
+fi
 [ -d "$_DOCTOR_COPILOT_DIR" ] && echo "OK   copilot session-state dir present: $_DOCTOR_COPILOT_DIR (VS Code Agents transcripts resolve from here -- issue: vscode)"
 
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources

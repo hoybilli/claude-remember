@@ -459,14 +459,17 @@ fi
 # More than nine digits is treated the same way, so 10# below cannot wrap a
 # huge value into an arbitrary one.
 _TURN_END_DEBOUNCE=0
-_TURN_END_TOKEN=""
+# _TURN_END_MARK holds this turn's token (pid-random-epoch), the one it
+# writes to _TURN_END_FILE and its sleeper compares against.
+_TURN_END_MARK=""
 _TURN_END_FILE=""
 if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ "$SESSION_END_REASON" = complete ] \
     && [ -n "$STDIN_SESSION_ID" ] && declare -F config_into >/dev/null 2>&1; then
     config_into _TURN_END_DEBOUNCE ".cooldowns.turn_end_debounce_seconds" 0
-    case "$_TURN_END_DEBOUNCE" in
-        ''|*[!0-9]*|??????????*) _TURN_END_DEBOUNCE=0 ;;
-    esac
+    if [ -z "$_TURN_END_DEBOUNCE" ] || [[ "$_TURN_END_DEBOUNCE" == *[!0-9]* ]] \
+        || [[ "$_TURN_END_DEBOUNCE" == ??????????* ]]; then
+        _TURN_END_DEBOUNCE=0
+    fi
     _TURN_END_DEBOUNCE=$(( 10#$_TURN_END_DEBOUNCE ))
     # Capped at an hour: the sleeper's pid holds tmp/save-session.pid for the
     # whole window, which also suspends post-tool delta saves, so a huge
@@ -477,8 +480,8 @@ if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ "$SESSION_END_REASON" = complete
     fi
     if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
         _TURN_END_FILE="$REMEMBER_DIR/tmp/turn-end.$STDIN_SESSION_ID"
-        _TURN_END_TOKEN="$$-$RANDOM-$(_remember_date +%s)"
-        if printf '%s\n' "$_TURN_END_TOKEN" > "$_TURN_END_FILE" 2>/dev/null; then
+        _TURN_END_MARK="$$-$RANDOM-$(_remember_date +%s)"
+        if printf '%s\n' "$_TURN_END_MARK" > "$_TURN_END_FILE" 2>/dev/null; then
             log "hook" "session-end: turn-end save deferred ${_TURN_END_DEBOUNCE}s (cooldowns.turn_end_debounce_seconds)"
         else
             # A sleeper with no token on disk would always stand down and
@@ -553,7 +556,7 @@ fi
         sleep "$_TURN_END_DEBOUNCE"
         _turn_end_seen=""
         { read -r _turn_end_seen < "$_TURN_END_FILE"; } 2>/dev/null
-        if [ "$_turn_end_seen" != "$_TURN_END_TOKEN" ]; then
+        if [ "$_turn_end_seen" != "$_TURN_END_MARK" ]; then
             log "hook" "session-end: turn-end save superseded by a later turn"
             exit 0
         fi

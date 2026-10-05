@@ -841,7 +841,7 @@ def test_launcher_runs_the_hook_when_the_handle_step_fails(tmp_path):
     assert marker.is_file(), result.stderr
     assert result.returncode == 4, result.stderr
     assert b"claude-remember: launcher: could not detach background work" in result.stderr
-    assert b"the host will wait for it" in result.stderr
+    assert b"the caller will wait for it" in result.stderr
 
 
 def _run_path_lookup_only(tmp_path, root, fake_dir_name, marker):

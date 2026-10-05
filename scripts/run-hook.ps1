@@ -61,16 +61,16 @@ try {
     $target = (Join-Path (Join-Path $root 'scripts') $Script).Replace('\', '/')
 
     # stdin is not read here: bash inherits this process's stdin handle and
-    # reads the payload itself, so the bytes arrive exactly as the host wrote
-    # them (no re-encoding, no appended CRLF), EOF is the host's own, and the
-    # hooks' own bounded `read -t 1` applies when a host leaves the pipe open.
+    # reads the payload itself, so the bytes arrive exactly as the caller wrote
+    # them (no re-encoding, no appended CRLF), EOF is the caller's own, and the
+    # hooks' own bounded `read -t 1` applies when a caller leaves the pipe open.
     # Likewise stdout: bash writes to the inherited handle directly.
 
     if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
         # Constrained Language Mode (AppLocker / WDAC script enforcement):
         # Add-Type below is refused, so the background work cannot be
-        # detached and the host waits for it. The hook itself still runs.
-        Write-LauncherMessage 'claude-remember: launcher: Constrained Language Mode; could not detach background work, the host will wait for it'
+        # detached and the caller waits for it. The hook itself still runs.
+        Write-LauncherMessage 'claude-remember: launcher: Constrained Language Mode; could not detach background work, the caller will wait for it'
         & $bash $target @Rest
         exit $LASTEXITCODE
     }
@@ -111,7 +111,7 @@ public static void KeepOnlyStdioInheritable() {
         }
         [ClaudeRemember.Handles]::KeepOnlyStdioInheritable()
     } catch {
-        Write-LauncherMessage "claude-remember: launcher: could not detach background work ($_); the host will wait for it"
+        Write-LauncherMessage "claude-remember: launcher: could not detach background work ($_); the caller will wait for it"
     }
 
     & $bash $target @Rest

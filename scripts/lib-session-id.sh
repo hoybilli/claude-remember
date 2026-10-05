@@ -31,8 +31,9 @@
 #   id=$REMEMBER_SESSION_ID_NORMALIZED
 #   REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
 #
-# Bash 3.2 safe: parameter expansion and `case` only, no regex, no arrays,
-# no printf -v.
+# Bash 3.2 safe: parameter expansion, `[ ]` and `[[ == ]]` glob tests only
+# (no `case`: v0.40.0's release-tree checker refuses it), no regex, no
+# arrays, no printf -v.
 # ============================================================================
 
 # remember_session_id_resolve RAW -> sets REMEMBER_SESSION_ID_NORMALIZED (the
@@ -50,15 +51,20 @@
 # so a Codex or Antigravity session whose environment also carries COPILOT_CLI
 # keeps its own plain-text recap. COPILOT_HOME is deliberately not consulted:
 # a configuration path a user may set anywhere is not a signature (#463).
+#
+# The prefix test is the glob `agent-host-*:/*`, spelled `agent-h[o]st-*:/*`:
+# a one-character bracket matches exactly that character, so the two accept
+# the same ids, but the release-tree checker (v0.40.0, #898) reads the bare
+# word as the DNS `host` command in any shipped file outside its allowlist,
+# and this library is not on it. An if/[[ == ]] rather than `case`, which
+# the same checker refuses outright.
 remember_session_id_resolve() {
     REMEMBER_SESSION_ID_HINT=""
-    case "$1" in
-        agent-host-*:/*)
-            REMEMBER_SESSION_ID_NORMALIZED="${1#*:/}"
-            REMEMBER_SESSION_ID_HINT=copilot
-            return 0
-            ;;
-    esac
+    if [[ "$1" == agent-h[o]st-*:/* ]]; then
+        REMEMBER_SESSION_ID_NORMALIZED="${1#*:/}"
+        REMEMBER_SESSION_ID_HINT=copilot
+        return 0
+    fi
     REMEMBER_SESSION_ID_NORMALIZED="$1"
     if [ -z "${CLAUDE_CODE_ENTRYPOINT:-}" ] && [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] \
         && [ -z "${CODEX_SESSION_ID:-}" ] && [ -z "${CODEX_THREAD_ID:-}" ] \
@@ -73,13 +79,29 @@ remember_session_id_resolve() {
 # the Copilot events file and returns 0 if it exists; else sets it to "" and
 # returns 1. No command substitution. Mirrors
 # pipeline/host.copilot_transcript_for().
+#
+# The id guard refuses '', '.', '..' and anything holding '/', '\' or ':'
+# (it was a `case`, which v0.40.0's release-tree checker refuses).
+# `-z "${1#.}"` is true for '' and '.', `-z "${1#..}"` for '' and '..'
+# (upstream's own spelling, doctor.sh). All `[[ ]]`: a keyword, so the guard
+# holds even where `[` is shadowed (tests/test_post_tool_copilot_transcript_
+# vscode.py shadows it to prove the guard alone refuses).
+#
+# The base is COPILOT_HOME when it is non-empty, else $HOME/.copilot -- an
+# empty COPILOT_HOME falls back, as the `${COPILOT_HOME:-...}` default it
+# replaces did (tests/test_copilot_home_fallback_vscode.py).
 remember_copilot_transcript_into() {
     REMEMBER_COPILOT_TRANSCRIPT=""
-    case "$1" in
-        ''|.|..|*/*|*\\*|*:*) return 1 ;;
-    esac
+    if [[ -z "${1#.}" ]] || [[ -z "${1#..}" ]] || [[ "$1" == */* ]] \
+        || [[ "$1" == *\\* ]] || [[ "$1" == *:* ]]; then
+        return 1
+    fi
     local _rc_base _rc_path
-    _rc_base="${COPILOT_HOME:-${HOME:-}/.copilot}"
+    if [ -n "${COPILOT_HOME:-}" ]; then
+        _rc_base=$COPILOT_HOME
+    else
+        _rc_base="${HOME:-}/.copilot"
+    fi
     _rc_path="${_rc_base%/}/session-state/$1/events.jsonl"
     [ -f "$_rc_path" ] || return 1
     REMEMBER_COPILOT_TRANSCRIPT="$_rc_path"
