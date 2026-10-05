@@ -51,16 +51,9 @@
 # so a Codex or Antigravity session whose environment also carries COPILOT_CLI
 # keeps its own plain-text recap. COPILOT_HOME is deliberately not consulted:
 # a configuration path a user may set anywhere is not a signature (#463).
-#
-# The prefix test is the glob `agent-host-*:/*`, spelled `agent-h[o]st-*:/*`:
-# a one-character bracket matches exactly that character, so the two accept
-# the same ids, but the release-tree checker (v0.40.0, #898) reads the bare
-# word as the DNS `host` command in any shipped file outside its allowlist,
-# and this library is not on it. An if/[[ == ]] rather than `case`, which
-# the same checker refuses outright.
 remember_session_id_resolve() {
     REMEMBER_SESSION_ID_HINT=""
-    if [[ "$1" == agent-h[o]st-*:/* ]]; then
+    if [[ "$1" == agent-host-*:/* ]]; then
         REMEMBER_SESSION_ID_NORMALIZED="${1#*:/}"
         REMEMBER_SESSION_ID_HINT=copilot
         return 0

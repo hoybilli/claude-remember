@@ -267,6 +267,7 @@ NETWORK_WORD_ALLOWLIST = frozenset({
     "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
     "scripts/doctor.sh", "scripts/install_agy_hooks.py",
     "scripts/lib-env-cache.sh", "scripts/lib-lock.sh", "scripts/lib-memory-context.sh",
+    "scripts/lib-session-id.sh",
     "scripts/lib-staging-lock.sh", "scripts/log.sh", "scripts/post-tool-hook.sh",
     "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
     "scripts/session-start-hook.sh", "scripts/user-prompt-hook.sh",
