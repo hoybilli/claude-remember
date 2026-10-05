@@ -1,75 +1,67 @@
 # Installing under VS Code Agents, the Copilot CLI and the Copilot desktop app
 
-Evidence and launcher internals: [vscode-verification.md](vscode-verification.md).
+Evidence: [vscode-verification.md](vscode-verification.md).
 
 ## What works
 
-Three hosts run the same Copilot harness and load this plugin from its Claude-format manifest: VS Code Agents, the Copilot CLI (1.0.92-3) and the Copilot desktop app. All three were **observed** on Windows 11 with Git Bash and Windows PowerShell 5.1. macOS and Linux hosts are unverified (the test suite ran on Linux, no host did).
+VS Code Agents, the Copilot CLI and the Copilot desktop app run one Copilot harness and load this plugin's Claude-format manifest. All three were **observed** on Windows 11 (Git Bash, Windows PowerShell 5.1) and on macOS 27 (Apple silicon, stock bash 3.2). Linux hosts are unverified (only the test suite ran there).
 
-In VS Code and the Copilot CLI the memory recap is injected at SessionStart. In the desktop app the hooks fired and saves ran; injection was not recorded. The transcript is read from `~/.copilot/session-state/<uuid>/events.jsonl`; saves go into the project's `.remember/`, shared with Claude Code in the same project.
+| Observed on | VS Code Agents | Copilot CLI | Desktop app |
+| --- | --- | --- | --- |
+| Hooks fired | Windows, macOS | Windows, macOS | Windows, macOS |
+| Recap injected | Windows, macOS | Windows, macOS | macOS |
+| Transcript read; saves ran | Windows, macOS | macOS | Windows, macOS |
 
-On Windows each hook starts a small PowerShell script, the launcher (`scripts/run-hook.ps1`), which finds Git Bash and runs the hook with it: one extra child PowerShell per hook, started with `-ExecutionPolicy Bypass` for that process only. See [vscode-verification.md](vscode-verification.md#how-hooks-are-launched-on-windows).
+The transcript is read from `~/.copilot/session-state/<uuid>/events.jsonl`; saves go into the project's `.remember/`, shared with Claude Code.
+
+On macOS the hooks run with plain bash. On Windows each goes through a PowerShell launcher, `scripts/run-hook.ps1`, that finds Git Bash: one extra process per hook, with `-ExecutionPolicy Bypass` for that process ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
 
 ## Install
 
-- **`copilot plugin install Digital-Process-Tools/claude-remember`** (**reasoned**, not observed).
-- **VS Code:** set `"chat.pluginLocations": {"<absolute path to a checkout>": true}`, then run **Developer: Reload Window** (**observed**). VS Code runs hooks from a mirror copy and does not re-mirror a path that is already registered, so an in-place edit is not picked up; re-register under a new path (or reinstall) to refresh.
-- **Copilot CLI:** `copilot --plugin-dir <checkout>`, or a local marketplace (`copilot plugin marketplace add <path>`, then `copilot plugin install`) (**observed**). The desktop app was given the plugin through the same marketplace route (**observed**) and never lists it under Installed.
+- **VS Code** (observed on Windows and macOS): in your user `settings.json`, set `"chat.pluginLocations": {"<absolute path to the plugin>": true}`, then run **Developer: Reload Window**. The plugin syncs on the first **New Chat**, not on the reload (observed on macOS). Hooks run from a mirror copy that is not refreshed: register changed files under a new path. On macOS, register a copy without `.git/` (a `git archive` export or a release download) or a checkout with `core.fsmonitor` off.
+- **Copilot CLI** (observed on Windows and macOS): `copilot --plugin-dir <plugin directory>`, or a local marketplace (`copilot plugin marketplace add <directory>`, then `copilot plugin install`).
+- **Desktop app** (observed on Windows and macOS): the same local marketplace. The plugin must sit inside the marketplace directory, named by a relative `source` such as `"./remember"`; an absolute path is rejected with `Plugin path escapes marketplace directory` (observed on macOS). On Windows it never appeared under Installed.
+- `copilot plugin install Digital-Process-Tools/claude-remember` should also work (reasoned, not tried).
 
 ## Requirements
 
-- Git for Windows: the hooks are bash. See [windows.md](windows.md).
-- `jq`. Without it nothing is injected in VS Code or the Copilot CLI; the log (`.remember/logs/memory-<date>.log`) says so.
-- The `claude` CLI (Claude Code's) on `PATH`. Summaries run through `claude -p`; there is no Copilot-native summarizer.
+- Bash: Git for Windows on Windows ([windows.md](windows.md)); stock bash on macOS.
+- Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it).
+- `jq`: it ships with recent macOS (`/usr/bin/jq`); install it on Windows. Without it nothing is injected in VS Code or the CLI; `.remember/logs/memory-<date>.log` says so.
+- Claude Code's `claude` CLI on `PATH` (summaries run through `claude -p`).
 
 ## How saving works here
 
-VS Code Agents sends `SessionEnd` with `reason=complete` after every turn and nothing when the session closes, so there the per-turn save is the only save. Whether the CLI does is unverified. The save runs in the background. Two behaviours, set by `cooldowns.turn_end_debounce_seconds` ([configuration.md](configuration.md)).
+- **VS Code Agents** (observed on Windows and macOS) and **the desktop app** (observed on macOS) send `SessionEnd` (`reason=complete`) after every turn, and a background save runs each time. VS Code sends nothing on close (observed on Windows), so that is its only save.
+- **The Copilot CLI** sends `SessionEnd` once, on `/exit` (`reason=user_exit`), and saves then (observed on macOS). Closing it without `/exit` (a killed terminal) would lose turns no PostToolUse save caught (reasoned).
 
-**A. Immediate (default, `0`).** Each turn is saved as it ends: one summarizer call per turn with new content (observed cost $0.0043-$0.0070 per call, Haiku through `claude -p`), and a loss window of only the few seconds the save takes.
+For that per-turn save (`copilot` host hint, `reason=complete`; never the CLI's `user_exit` or other hosts), `cooldowns.turn_end_debounce_seconds` ([configuration.md](configuration.md)) chooses between two behaviours.
 
-**B. Debounced (`N` > 0).** Each turn's save waits `N` seconds and stands down if a later turn of the same session ends meanwhile, so a burst of turns is saved once, `N` seconds after its last turn, as one summary. The cost is a loss window of `N` seconds: if the machine sleeps or VS Code is killed inside it, that burst can go unsaved unless a later turn in the same session saves it. Put this in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project); 30 is an example:
+**A. Immediate (default, `0`).** Each turn is saved at once: one summarizer call per turn with new content (observed $0.0043-$0.0070 per call on Windows and macOS), and a loss window of seconds.
 
-```json
-{
-  "cooldowns": {
-    "turn_end_debounce_seconds": 30
-  }
-}
-```
+**B. Debounced (`N` > 0).** A turn's save waits `N` seconds; if another turn ends first, the wait restarts. A burst of turns costs one summarizer call, `N` seconds after the last turn. The risk: a sleep or a killed host inside those `N` seconds loses the burst, unless the session has a later turn. Put `{"cooldowns": {"turn_end_debounce_seconds": 30}}` in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project).
 
-The log records `session-end: turn-end save deferred Ns (cooldowns.turn_end_debounce_seconds)` when a save is scheduled and `session-end: turn-end save superseded by a later turn` when one stands down. `N` is capped at 3600. To turn it off, set the key to `0` or delete the file (v0.37.0+).
-
-The debounce applies only under the `copilot` host hint (VS Code Agents; the CLI too, if it sends `complete`, unverified) and only for `reason=complete`; other hosts are unaffected.
+The log says `turn-end save deferred Ns` when a save is scheduled and `turn-end save superseded by a later turn` when one stands down. `N` is capped at 3600; ten or more digits, like anything but a plain non-negative integer, is read as `0`. To turn it off, set the key back to `0` or remove it. (Before v0.37.0 a removed per-project `config.json` kept serving its old value; this port ships the fix.)
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Nothing injected at SessionStart | No `jq`; or the host was started from inside a Claude Code shell, so the recap goes out as plain text (observed for the CLI, reasoned for VS Code) | Install `jq`; start VS Code or `copilot` from a shell without Claude Code's `CLAUDE_CODE_*` variables |
-| A hook does nothing; stderr says `Git Bash not found` | No Git Bash found | Install Git for Windows, or set `REMEMBER_BASH` to `bash.exe` |
-| `scripts/doctor.sh` prints `FAIL Session dir MISSING` | Expected on a Copilot-only project | Read the `OK   last save came from a VS Code Agents / Copilot session` line and the verdict (`capture is working`, or the summarizer verdict). Needs `jq` |
-| In VS Code the harness shows SessionStart `success=false` | Another plugin's SessionStart hook failed | This plugin's context is still injected. Fix the other plugin |
-| In the Copilot CLI the recap is missing | Another plugin's hook failed in the same batch, and the CLI drops the whole batch's output | Fix the other plugin |
-| The desktop app saved into `~/.copilot/chats/<date>/<slug>/.remember` | No Project was attached to the session | Attach a Project |
+| Nothing injected at SessionStart | No `jq`; or the host was started from a terminal inside Claude Code, so the plugin prints plain text as for Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install `jq`; start the host from a terminal outside Claude Code |
+| VS Code on macOS shows nothing from the plugin; `agenthost.log` (VS Code's log folder) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: the mirror copy cannot open that socket in `.git/` and the sync aborts (observed on macOS) | Register a copy without `.git/`, or run `git config core.fsmonitor false` and stop its daemon; register under a new path |
+| `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows, or set `REMEMBER_BASH` to `bash.exe` |
+| `scripts/doctor.sh` prints `FAIL Session dir MISSING` | Expected on a Copilot-only project | Read the `OK   last save came from a VS Code Agents / Copilot session` line and the verdict (needs `jq`) |
+| VS Code shows SessionStart `success=false`, or the CLI shows no recap | Another plugin's hook failed: VS Code still injects this plugin's context; the CLI drops the batch's output (seen on Windows) | Fix the other plugin |
+| The desktop app saved into `~/.copilot/chats/<date>/<slug>/.remember` | No Project was attached (seen on Windows) | Attach a Project |
 
 ## Limitations
 
-- UserPromptSubmit output is not injected: never in VS Code; the CLI would, but this plugin's hook does not yet send it in the form the CLI accepts.
-- The CLI drops the whole batch's output when a sibling plugin's hook fails.
-- Under Constrained Language Mode (AppLocker or WDAC) the hooks run but the host waits for each save (observed by simulation).
-- An execution policy enforced by Group Policy blocks the launcher (not observed).
-- Promos are not shown on these hosts (reasoned from the code).
-- On a project also used from Claude Code, `doctor.sh` can say `capture is working` after a Copilot save even if Claude Code's own capture is broken; the `FAIL` line is the hint (reasoned).
-- macOS and Linux hosts are unverified.
+- The per-prompt time stamp (`prompt_stamp`, Claude Code's `[14:30 CEST -- user]` line) is not injected: VS Code ignores it, and the CLI would accept it (both observed on Windows) in a shape this plugin's hook does not yet send.
+- Under Constrained Language Mode (AppLocker or WDAC, Windows) the host waits for each save (shown in a test that sets the language mode in process, not under a real policy).
+- An execution policy enforced by Group Policy blocks the Windows launcher (not observed).
+- Promos are not shown on these hosts (reasoned from the code; pinned by a test that ran on macOS).
+- On a project also used from Claude Code, a Copilot save can make `doctor.sh` say `capture is working` while Claude Code's capture is broken; only the `FAIL` line hints at it (reasoned).
 
-## Follow-ups
+## Not done yet
 
-Not done; see [vscode-verification.md](vscode-verification.md#coverage-gaps-and-follow-ups).
-
-- Send UserPromptSubmit output in the form the CLI accepts.
-- Make doctor tell a Copilot-only project from a mixed one.
-- Recognise Gemini CLI as its own host; a Gemini session started from a shell that exports `COPILOT_CLI` would be treated as Copilot (reasoned).
-- Record the VS Code version for the 2026-10-03 runs.
-
-Tests and fixtures for this port carry the placeholder token `vscode` in their names (`tests/test_*_vscode.py`, `tests/fixtures/vscode-*`).
+Open: the CLI's prompt stamp, doctor on a mixed project and a Gemini CLI signature ([the record](vscode-verification.md#coverage-gaps-and-follow-ups)).
