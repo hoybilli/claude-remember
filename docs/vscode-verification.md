@@ -24,7 +24,7 @@ Read on 2026-10-04; the app reports runtime `copilotVersion 0.0.0`.
 
 | Component | Windows 11 | macOS 27.0.1 |
 | --- | --- | --- |
-| VS Code | 1.139.1 at the 2026-09-30 probes, 1.140.0 after reloads (observed); 1.140.0 for 2026-10-03 (reasoned: installed 2026-09-30, unchanged since) | 1.140.0 (observed) |
+| VS Code | 1.139.1 at the 2026-09-30 probes, 1.140.0 after reloads (observed); 1.140.0 for 2026-10-03 (reasoned: installed 2026-09-30, unchanged since; a window running since before that update would have used the older build) | 1.140.0 (observed) |
 | Copilot Chat | 0.68.0 for 2026-10-03 (reasoned: ships in VS Code 1.140.0) | 0.68.0 (observed after the run) |
 | Copilot CLI | 1.0.92-3, prerelease (observed) | 1.0.91, stable (observed) |
 | Desktop app | 1.1.26 (reasoned: installed 2026-10-03; later auto-update not excluded) | 1.1.26 (observed) |
