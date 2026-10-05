@@ -148,24 +148,63 @@ _ENVELOPE_FAILED_LOG = "copilot envelope could not be built"
 _UNBUFFERED_LOG = "copilot host, recap not buffered"
 
 
-def _path_without_jq():
-    """PATH minus every directory holding jq, or None when jq shares a
-    directory with the coreutils the hook needs (typical on Linux/macOS,
-    where jq is in /usr/bin) -- it cannot be hidden there."""
+_JQ_NAMES = ("jq", "jq.exe")
+
+
+def _holds(directory, names):
+    return any(os.path.isfile(os.path.join(directory, n)) for n in names)
+
+
+def _path_without_jq(tmp_path):
+    """PATH with jq hidden and every other tool left in place.
+
+    A directory without jq stays as it is. A directory with jq is replaced,
+    at the same PATH position, by a mirror of symlinks to everything in it
+    except jq. Dropping the directory instead would also drop its neighbours:
+    on macOS jq is /usr/bin/jq but cat is /bin/cat, so dropping /usr/bin loses
+    `tr` (only at /usr/bin/tr) and the hook dies on `tr: command not found`.
+    On Linux with merged /usr, jq and cat share a directory, which is why an
+    approach that only drops directories could never run there.
+
+    Windows: a jq directory without cat (the Chocolatey/Scoop shims case) is
+    dropped, as nothing the hook needs lives there. Otherwise the mirror needs
+    symlinks, which need privilege on Windows: skip when they are refused.
+    """
     kept = []
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        if d and any(os.path.isfile(os.path.join(d, n)) for n in ("jq", "jq.exe")):
-            if any(os.path.isfile(os.path.join(d, n)) for n in ("cat", "cat.exe")):
-                return None
+    for n, d in enumerate(os.environ.get("PATH", "").split(os.pathsep)):
+        if not d or not _holds(d, _JQ_NAMES):
+            kept.append(d)
             continue
-        kept.append(d)
+        if os.name == "nt" and not _holds(d, ("cat", "cat.exe")):
+            continue
+        mirror = tmp_path / f"nojq-{n}"
+        mirror.mkdir()
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue  # unreadable: nothing usable in it, and jq cannot be proven absent
+        for name in names:
+            if name in _JQ_NAMES:
+                continue
+            try:
+                os.symlink(os.path.join(os.path.abspath(d), name), mirror / name)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if os.name == "nt":
+                    pytest.skip(f"cannot symlink to mirror a PATH directory: {exc}")
+                continue
+        kept.append(str(mirror))
     return os.pathsep.join(kept)
 
 
 def test_copilot_without_jq_logs_why_nothing_is_injected(tmp_path):
-    path = _path_without_jq()
-    if path is None:
-        pytest.skip("jq shares a PATH directory with coreutils; cannot hide it")
+    path = _path_without_jq(tmp_path)
+    # Positive control: jq is really hidden, and what the hook needs is not.
+    # shutil.which applies PATHEXT on Windows, so the bare names work there too.
+    assert shutil.which("jq", path=path) is None
+    for tool in ("tr", "cat", "date"):
+        assert shutil.which(tool, path=path), f"{tool} lost from the jq-less PATH"
     out = _run(tmp_path, UUID, {"COPILOT_CLI": "1", "PATH": path})
     _assert_plain(out)
     assert _NO_JQ_LOG in _logs(tmp_path)
