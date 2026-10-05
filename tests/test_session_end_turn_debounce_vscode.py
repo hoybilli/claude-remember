@@ -102,6 +102,7 @@ class Sandbox:
         # Byte copies (not read_text/write_text, which would write CRLF on
         # Windows) of the real scripts and pipeline package.
         shutil.copytree(REPO_ROOT / "scripts", self.plugin / "scripts")
+        shutil.copytree(REPO_ROOT / ".claude-plugin", self.plugin / ".claude-plugin")
         shutil.copytree(REPO_ROOT / "pipeline", self.plugin / "pipeline",
                         ignore=shutil.ignore_patterns("__pycache__"))
         _write_lf(self.plugin / "scripts" / "save-session.sh",
