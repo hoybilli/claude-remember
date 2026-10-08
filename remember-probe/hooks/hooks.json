@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/recorder.sh\" claudefmt SessionStart command",
+            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-probe.ps1\" claudefmt SessionStart powershell; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/recorder.sh\" claudefmt UserPromptSubmit command",
+            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-probe.ps1\" claudefmt UserPromptSubmit powershell; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/recorder.sh\" claudefmt PostToolUse command",
+            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-probe.ps1\" claudefmt PostToolUse powershell; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/recorder.sh\" claudefmt SessionEnd command",
+            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-probe.ps1\" claudefmt SessionEnd powershell; exit $LASTEXITCODE",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

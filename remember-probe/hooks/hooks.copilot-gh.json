@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh SessionStart bash",
+        "powershell": "$r=$env:COPILOT_PLUGIN_ROOT; if (-not $r) { $r=$env:CLAUDE_PLUGIN_ROOT }; if (-not $r) { $r=$env:PLUGIN_ROOT }; if (-not $r) { $r='.' }; powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$r\\scripts\\run-probe.ps1\" copilot-gh SessionStart powershell; exit $LASTEXITCODE",
+        "command": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh SessionStart command",
+        "timeoutSec": 30
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh UserPromptSubmit bash",
+        "powershell": "$r=$env:COPILOT_PLUGIN_ROOT; if (-not $r) { $r=$env:CLAUDE_PLUGIN_ROOT }; if (-not $r) { $r=$env:PLUGIN_ROOT }; if (-not $r) { $r='.' }; powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$r\\scripts\\run-probe.ps1\" copilot-gh UserPromptSubmit powershell; exit $LASTEXITCODE",
+        "command": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh UserPromptSubmit command",
+        "timeoutSec": 30
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh PostToolUse bash",
+        "powershell": "$r=$env:COPILOT_PLUGIN_ROOT; if (-not $r) { $r=$env:CLAUDE_PLUGIN_ROOT }; if (-not $r) { $r=$env:PLUGIN_ROOT }; if (-not $r) { $r='.' }; powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$r\\scripts\\run-probe.ps1\" copilot-gh PostToolUse powershell; exit $LASTEXITCODE",
+        "command": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh PostToolUse command",
+        "timeoutSec": 30
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh SessionEnd bash",
+        "powershell": "$r=$env:COPILOT_PLUGIN_ROOT; if (-not $r) { $r=$env:CLAUDE_PLUGIN_ROOT }; if (-not $r) { $r=$env:PLUGIN_ROOT }; if (-not $r) { $r='.' }; powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$r\\scripts\\run-probe.ps1\" copilot-gh SessionEnd powershell; exit $LASTEXITCODE",
+        "command": "bash \"${COPILOT_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}}/scripts/recorder.sh\" copilot-gh SessionEnd command",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

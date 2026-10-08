@@ -1,0 +1,7 @@
+{
+  "name": "remember-probe",
+  "version": "0.0.1",
+  "description": "throwaway hook probe; delete after use",
+  "author": {"name": "local probe"},
+  "hooks": "./hooks/hooks.copilot-gh.json"
+}
