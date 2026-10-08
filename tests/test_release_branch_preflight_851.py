@@ -300,6 +300,33 @@ def test_good_front_matter_in_an_agent_passes(tmp_path):
     "Bash(env:*)",
     "Bash(python*:*)",
     "Bash(python3:*)",
+    # #879: a `..` segment inside a plugin-root-prefixed path was trusted before any
+    # `..` check ran, an unlisted bash variant like `bash5` was not caught because the
+    # first-word check never stripped trailing digits, and several wrapper commands
+    # that can run arbitrary programs were missing from _UNSCOPED_COMMANDS.
+    "Bash(${CLAUDE_PLUGIN_ROOT}/../../../bin/bash:*)",
+    "Bash(bash5:*)",
+    "Bash(xargs:*)",
+    "Bash(sudo:*)",
+    "Bash(eval:*)",
+    "Bash(exec:*)",
+    "Bash(source:*)",
+    "Bash(.:*)",
+    "Bash(find:*)",
+    "Bash(awk:*)",
+    "Bash(nohup:*)",
+    "Bash(timeout:*)",
+    # #950: command/nice/stdbuf missing from _UNSCOPED_COMMANDS, and the `..`
+    # check only split on forward slash, missing a backslash-separated escape.
+    "Bash(command:*)",
+    "Bash(command curl:*)",
+    "Bash(nice:*)",
+    "Bash(stdbuf:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/..\\..\\bin\\bash:*)",
+    # a path with no forward slash at all was still collected by `paths` only
+    # via its "/" membership check, so a fully backslash-separated grant slid
+    # through the whole per-path loop untouched (auditor finding, #950).
+    "Bash(${CLAUDE_PLUGIN_ROOT}\\..\\..\\bin\\bash:*)",
 ])
 def test_unrestricted_bash_grant_as_a_string_fails(tmp_path, rel, value):
     body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()

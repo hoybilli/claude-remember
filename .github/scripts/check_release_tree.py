@@ -186,6 +186,55 @@ URL_HOST = re.compile(
     r"(?:com|org|net|io|dev|ai|co|gov|edu|app)\b"
 )
 
+# #919: a typed `<<DELIM`/`<<-DELIM`/`<<'DELIM'`/`<<"DELIM"` heredoc opener --
+# used by _check_url_in_comment below to skip past a heredoc body the same
+# way _in_code() above already skips past a fenced code block. Not a
+# here-string (`<<<`): the lookaround on the leading `<<` mirrors
+# TYPED_HEREDOC's own, and a bare `<<<DELIM` never matches because the third
+# `<` is not whitespace, a quote or a name-start character. Masking
+# arithmetic (`_mask_arithmetic`) before testing keeps `$(( x << 4 ))` from
+# being read as a heredoc opener either, for the same reason TYPED_HEREDOC
+# masks it.
+#
+# Review finding on #919: this same bare-identifier shape (`<< NAME`) is also
+# a bitwise left-shift against a named operand in Python/JS, and a C++-style
+# stream-insertion operator (`cout << endl`) -- neither is a heredoc. Heredocs
+# only exist in shell, so `_check_url_in_comment` below only engages this
+# tracking inside hooks/hooks.d/scripts (the same directories
+# `_check_typed_heredoc` above is scoped to); elsewhere this regex is never
+# even tested against a line, so the ambiguity cannot fire.
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?!<)")
+
+
+# #981 review finding: a naive quote-TOGGLE scan (flip on any `'`/`"`, flip
+# back on the next matching one) breaks on an ordinary English contraction
+# with no closing quote on the line ("it's", "don't") -- one stray
+# apostrophe before a REAL heredoc opener would flip the toggle on and
+# never off, making a genuine `<<EOF` read as "inside quotes" and silently
+# skipping it. Matching only COMPLETE quoted spans (both quote characters
+# present) avoids that: a lone apostrophe forms no span at all, so it
+# cannot swallow a real opener later on the same line.
+_QUOTED_SPAN = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
+
+
+def _in_quotes_before(line: str, idx: int) -> bool:
+    """#981: true if `idx` falls inside a COMPLETE single/double-quoted span
+    anywhere on `line` -- enough to tell "this << sits inside an ordinary
+    quoted string" (e.g. `echo "see <<EOF in the docs"`) from "this << is
+    real heredoc syntax", without attempting real shell quote/escape
+    parsing. Under-detecting a real heredoc opener here is the safe
+    direction: this tracking exists to SKIP content as heredoc body, so a
+    false positive here (treating an ordinary quoted string as an opener)
+    is what silently disables the URL-host-in-comment guard for the rest of
+    the file -- the opposite failure from _check_typed_heredoc's own FAIL
+    guard, where over-flagging is the safe side."""
+    for m in _QUOTED_SPAN.finditer(line):
+        if m.start() > idx:
+            break
+        if m.start() <= idx < m.end():
+            return True
+    return False
+
 # #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
 # drill as plain dictionary entries, one per line -- not as shell commands.
 # Catching every English use of "host" or "fetch" would FAIL this repo's own
@@ -273,6 +322,7 @@ NETWORK_WORD_ALLOWLIST = frozenset({
     "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
     "scripts/session-start-hook.sh", "scripts/user-prompt-hook.sh",
     "hooks.d/after_save/50-git-backup.sh", "hooks.d/before_session_start/50-git-restore.sh",
+    "hooks.d/after_save/60-git-reconcile.sh",
 })
 
 # #898 round 2: `[ "$VAR" = "${BASH_SOURCE[0]}" ] && VAR="."` -- jit-context's
@@ -672,8 +722,14 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
                 # Used to skip every .md file -- the portal flagged README.md
                 # naming a credential env var, which that skip hid from REVIEW (#866).
                 result.reviews.append(f"{rel}: reads or names {', '.join(uses)}")
-            for n, line in enumerate(text.splitlines(), 1):
-                if line.lstrip().startswith("#"):
+            # #980: heredoc body content must not be read as ordinary
+            # code here either -- tracked only inside hooks/hooks.d/scripts,
+            # the same scope _check_url_in_comment's own tracker uses, since
+            # a bare `<< NAME` has no heredoc meaning in a non-shell text
+            # file (.py, .md, ...).
+            track_heredocs = rel.split("/")[0] in _SCRIPT_DIRS
+            for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs):
+                if is_comment:
                     continue
                 if EVAL_OF_SUBSTITUTION.search(line):
                     result.reviews.append(f"{rel}:{n}: eval fed by a command "
@@ -719,6 +775,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_backslash_quote(files, kinds, off)
     _check_catch_all_in_loop(files, kinds, off)
     _check_case_statement(files, kinds, off)
+    _check_single_line_delegate_positional(files, kinds, off)
     _check_dot_string(files, kinds, result.reviews)
     _check_escaped_quote(files, kinds, result.reviews)
     _check_slash_glob_case(files, kinds, result.reviews)
@@ -846,6 +903,9 @@ _UNSCOPED_COMMANDS = {
     "poetry", "cargo", "go", "gem", "brew",
     # downloaders
     "curl", "wget",
+    # wrapper commands that can run arbitrary programs (#879, #950)
+    "xargs", "sudo", "eval", "exec", "source", ".", "find", "awk", "nohup", "timeout",
+    "command", "nice", "stdbuf",
 }
 _PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
 
@@ -867,10 +927,12 @@ def bash_grant_problem(entry: str) -> str | None:
     words = cmd.split()
     if not words:
         return f"`Bash({pattern})` grants every shell command"
-    paths = [w for w in words if "/" in w]
+    paths = [w for w in words if "/" in w or "\\" in w]
     for p in paths:
         if "*" in p or "?" in p:
             return f"`Bash({pattern})` has a wildcard in the path"
+        if ".." in re.split(r"[/\\]", p):
+            return f"`Bash({pattern})` has a `..` path segment"
         if not p.startswith(_PLUGIN_ROOT):
             base = p.rsplit("/", 1)[-1].lower()
             if base in _UNSCOPED_COMMANDS or base.rstrip("0123456789.") in _UNSCOPED_COMMANDS:
@@ -879,7 +941,8 @@ def bash_grant_problem(entry: str) -> str | None:
                 return (f"`Bash({pattern})` names a relative path; name the plugin's script "
                         f"as {_PLUGIN_ROOT}...")
     first = words[0].rstrip("*").lower()
-    if first in _UNSCOPED_COMMANDS and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
+    first_unscoped = first in _UNSCOPED_COMMANDS or first.rstrip("0123456789.") in _UNSCOPED_COMMANDS
+    if first_unscoped and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
         return f"`Bash({pattern})` is a wildcard after `{words[0]}`, not one plugin script"
     return None
 
@@ -941,6 +1004,59 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
 
 
+def _iter_non_heredoc_lines(text: str, track_heredocs: bool):
+    """Yield (line_no, line, is_comment) for every line of `text` that is
+    not inside the body of a typed `<<DELIM ... DELIM` heredoc -- heredoc
+    *body* lines are never yielded at all, so a checker built on this never
+    mis-reads heredoc content as ordinary comment-skipped code or vice versa
+    (#980, adjacent finding from #919/#978's lane self-review: every other
+    `#`-comment-skipping checker in this file used the bare
+    `line.lstrip().startswith('#')` test alone, with no heredoc-boundary
+    tracking of its own).
+
+    Mirrors the tracker `_check_url_in_comment` already carries (#919):
+    keyed on the heredoc's own delimiter, `<<-DELIM` strips leading tabs on
+    the closer and a plain `<<DELIM` does not, and an opener found inside an
+    ordinary quoted string or a `#` comment is not a real heredoc open
+    (#981). `track_heredocs=False` keeps the original comment-only
+    behaviour for a caller whose files are not guaranteed to be shell
+    scripts, where a bare `<< NAME` is just as likely to be a left-shift or
+    a C++-style stream-insertion operator as a heredoc opener (the same
+    reasoning as _check_url_in_comment's own `track_heredocs` gate).
+
+    Unlike _check_url_in_comment's own hand-rolled copy of this same loop,
+    this generator has no "the heredoc opened here was never closed" signal
+    back to its 16 callers (review finding on #980) -- an unclosed/malformed
+    `<<DELIM` silently blinds every one of them to the rest of the file,
+    with no diagnostic of its own. This is a real gap, left unfixed here
+    rather than threading an extra `rel`/off-list parameter through 24 call
+    sites in this one lane: it is mitigated, not masked, because
+    `check_tree` always runs the unchanged `_check_url_in_comment` on every
+    file too, with the exact same `track_heredocs` scope condition (hooks/
+    hooks.d/scripts) -- so any file reachable by one of these 16 callers
+    that has a genuinely unclosed heredoc is guaranteed to also trip that
+    function's own "heredoc opener ... is never closed" FAIL in the same
+    run (tests/test_heredoc_comment_guard_980.py pins this). A future
+    change that moves or narrows _check_url_in_comment's own scope would
+    need to re-examine this coupling."""
+    heredoc_delim = None
+    heredoc_dash = False
+    for n, line in enumerate(text.splitlines(), 1):
+        if heredoc_delim is not None:
+            closer = line.lstrip("\t") if heredoc_dash else line
+            if closer == heredoc_delim:
+                heredoc_delim = None
+            continue
+        is_comment = line.lstrip().startswith("#")
+        yield n, line, is_comment
+        if track_heredocs and not is_comment:
+            masked = _mask_arithmetic(line)
+            m = _HEREDOC_OPEN.search(masked)
+            if m and not _in_quotes_before(masked, m.start()):
+                heredoc_dash = bool(m.group(1))
+                heredoc_delim = m.group(3)
+
+
 def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
     """#898/#900: a typed `<<` anywhere in a shipped script is a directory
     hold, filed as "Unpinned npx launcher" -- the scanner cannot place the
@@ -964,8 +1080,13 @@ def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
         if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        # #980: this detector is itself self-referential -- without
+        # tracking the heredoc bodies it finds, a body line that happens to
+        # contain a second "<<WORD"-shaped substring read as an
+        # independent second opener. Skipping heredoc body lines (not just
+        # comments) fixes that.
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if TYPED_HEREDOC.search(_mask_arithmetic(line)):
                 off.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
@@ -981,14 +1102,56 @@ def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
     shipped `.sh` one, and the sibling guards below (network command names,
     the credential pair) are not directory-scoped either. A `.md` file's
     `#` heading is a false-positive risk this does not special-case; none of
-    this repo's shipped headings happens to carry a URL host today."""
+    this repo's shipped headings happens to carry a URL host today.
+
+    #919: a `#`-led line inside the body of a typed `<<DELIM ... DELIM`
+    heredoc is heredoc content, not a real shell comment, so it must not be
+    read as one -- tracked the same way _in_code() above tracks fenced-code
+    state, keyed on the heredoc's own delimiter rather than ``` ``` ```.
+    Unlike the URL-host check itself, this heredoc tracking IS scoped to
+    hooks/hooks.d/scripts (review finding on #919: a bare `<< NAME` is only
+    ever a heredoc opener in shell -- in any other shipped text file it is
+    just as likely to be a bitwise left-shift or a C++-style stream-
+    insertion operator, and tracking it there would silently swallow every
+    `#`-led line for the rest of that file). An unquoted `<<DELIM` heredoc's
+    closing line must be the bare delimiter with no leading/trailing
+    whitespace at all; only `<<-DELIM` strips leading tabs -- using
+    `.strip()` unconditionally would close a plain heredoc one line early on
+    an indented look-alike and read real heredoc body as ordinary file
+    content (review finding on #919)."""
     for rel, data in sorted(files.items()):
         if kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
+        track_heredocs = rel.split("/")[0] in ("hooks", "hooks.d", "scripts")
+        heredoc_delim = None
+        heredoc_dash = False
+        heredoc_open_line = None
         for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#") and URL_HOST.search(line):
+            if heredoc_delim is not None:
+                closer = line.lstrip("\t") if heredoc_dash else line
+                if closer == heredoc_delim:
+                    heredoc_delim = None
+                continue
+            is_comment = line.lstrip().startswith("#")
+            if is_comment and URL_HOST.search(line):
                 off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
+            # #981: bash never opens a heredoc from inside a `#` comment or
+            # from a `<<WORD`-shaped substring sitting inside an ordinary
+            # quoted string -- either one can otherwise leave this tracker
+            # "open" for the rest of the file, silently swallowing every
+            # later URL-host comment line.
+            if track_heredocs and not is_comment:
+                masked = _mask_arithmetic(line)
+                m = _HEREDOC_OPEN.search(masked)
+                if m and not _in_quotes_before(masked, m.start()):
+                    heredoc_dash = bool(m.group(1))
+                    heredoc_delim = m.group(3)
+                    heredoc_open_line = n
+        if heredoc_delim is not None:
+            off.append(f"{rel}:{heredoc_open_line}: a heredoc opener (<<{heredoc_delim}) is "
+                       f"never closed -- everything after it in this file was skipped as "
+                       f"heredoc body")
 
 
 def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
@@ -1097,8 +1260,10 @@ def _check_hook_names_other_hook(files: dict, kinds: dict, reviews: list) -> Non
         if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        # #980: these are hook scripts (shell), so a `#`-led line inside a
+        # typed heredoc's body is heredoc content, not a real comment.
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 for other in HOOK_SCRIPT_NAMES:
                     if other != name and other in line:
                         reviews.append(f"{rel}:{n}: names {other!r} in a comment -- "
@@ -1118,8 +1283,8 @@ def _check_computed_command_word(files: dict, kinds: dict, reviews: list) -> Non
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             m = COMPUTED_COMMAND_WORD.search(line)
             if m:
@@ -1135,8 +1300,8 @@ def _check_pwd_literal(files: dict, kinds: dict, off: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if PWD_LITERAL.search(line):
                 off.append(f"{rel}:{n}: '$PWD' is not allowed -- use '$(pwd)' instead: "
@@ -1151,8 +1316,8 @@ def _check_bare_env_word(files: dict, kinds: dict, off: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if BARE_ENV_WORD.search(line):
                 off.append(f"{rel}:{n}: a bare 'env' command is not allowed: "
@@ -1167,8 +1332,8 @@ def _check_nested_default_expansion(files: dict, kinds: dict, off: list) -> None
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if NESTED_DEFAULT_EXPANSION.search(line):
                 off.append(f"{rel}:{n}: a nested default expansion "
@@ -1192,8 +1357,8 @@ def _check_indirect_expansion(files: dict, kinds: dict, reviews: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if INDIRECT_EXPANSION.search(line):
                 reviews.append(f"{rel}:{n}: '${{!NAME}}' indirect-name "
@@ -1216,8 +1381,8 @@ def _check_lone_quote(files: dict, kinds: dict, reviews: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if LONE_QUOTE.search(line):
                 reviews.append(f"{rel}:{n}: a lone quote spliced between two "
@@ -1243,8 +1408,8 @@ def _check_backslash_quote(files: dict, kinds: dict, off: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if BACKSLASH_QUOTE.search(line):
                 off.append(f"{rel}:{n}: two backslashes immediately before "
@@ -1263,7 +1428,25 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
     scanner itself is (not a bash parser), rather than a tighter check that
     would stop matching what the scanner matches. FAIL: round 7 rewrote
     every instance this repo had as `[ ]` tests, so this guards against a
-    REintroduction, not a known holdout."""
+    REintroduction, not a known holdout.
+
+    #980 left this out because it shared the exact same unguarded
+    `line.lstrip().startswith("#")` comment test as the 16 functions #980
+    did route through _iter_non_heredoc_lines, and a heredoc-body line
+    could be misread the same two ways -- a `#`-led body line read as a
+    real comment (hiding a genuine catch-all-in-loop shape), or a body
+    line containing literal `while`/`for`/`until`/`done`/`*)` text read as
+    real loop/case syntax. #990: fixed by tracking heredoc delimiters
+    inline, the same way _iter_non_heredoc_lines does, rather than
+    delegating to that shared generator directly -- a first attempt doing
+    exactly that regressed in review: the generator's own heredoc-open
+    detection runs on every line it yields with no visibility into this
+    function's own in_string state, so a `<<WORD`-shaped substring inside
+    a tracked quoted string was misread as a real opener, silently
+    swallowing every later line (including a genuine catch-all-in-loop)
+    as fake heredoc body. The inline version below only looks for a
+    heredoc opener on a line that already passed the in_string/comment
+    checks, so the two states can never step on each other."""
     _loop_open = re.compile(r'(?:^|[;&|\s])(?:while|for|until)\s')
     _loop_close = re.compile(r'(?:^|[;&|\s])done(?=\s|;|$|\))')
     _catch_all = re.compile(r'(?:^|[\s;(])\*\)')
@@ -1279,7 +1462,14 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
         text = data.decode("utf-8")
         depth = 0
         in_string = False
+        heredoc_delim = None
+        heredoc_dash = False
         for n, raw_line in enumerate(text.splitlines(), 1):
+            if heredoc_delim is not None:
+                closer = raw_line.lstrip("\t") if heredoc_dash else raw_line
+                if closer == heredoc_delim:
+                    heredoc_delim = None
+                continue
             if in_string:
                 if raw_line.startswith("'") or re.search(r"^[^']*'\s*(\)|\"|$)", raw_line):
                     in_string = False
@@ -1302,6 +1492,22 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
                            f"same line a loop opens: {raw_line.strip()[:80]}")
             depth += opens - closes
             depth = max(depth, 0)
+            # #990: heredoc-open detection runs AFTER (never instead of) the
+            # in_string/comment checks above, deliberately -- the shared
+            # _iter_non_heredoc_lines generator has no visibility into this
+            # function's own in_string state, so delegating heredoc
+            # detection to it blindly let a `<<WORD`-shaped substring
+            # *inside* a tracked quoted string get misread as a real
+            # heredoc opener, silently swallowing every line after it as
+            # fake heredoc body (regression caught in review, #990).
+            # Detecting it locally, gated on reaching this point (i.e.
+            # already past the in_string/comment continues), keeps the two
+            # states from stepping on each other.
+            masked = _mask_arithmetic(raw_line)
+            m = _HEREDOC_OPEN.search(masked)
+            if m and not _in_quotes_before(masked, m.start()):
+                heredoc_dash = bool(m.group(1))
+                heredoc_delim = m.group(3)
 
 
 def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
@@ -1324,8 +1530,8 @@ def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             if DOT_STRING.search(line):
                 reviews.append(f"{rel}:{n}: a lone '.'/'..' as a quoted "
@@ -1333,15 +1539,20 @@ def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
 
 
 def _sh_lines(files: dict, kinds: dict):
-    """Yield (rel, line_no, line) for every non-comment line of every
-    shipped `.sh` file -- the scope round 7's shell-shape guards settled on
-    (a Python or jq file carries these byte shapes as ordinary code)."""
+    """Yield (rel, line_no, line) for every non-comment, non-heredoc-body
+    line of every shipped `.sh` file -- the scope round 7's shell-shape
+    guards settled on (a Python or jq file carries these byte shapes as
+    ordinary code). Feeds eight checkers at once (#980): a heredoc body
+    here is shell-script heredoc content, exactly the case
+    _check_url_in_comment already tracks (#919), so this shares that same
+    tracker rather than each of the eight hand-rolling (or omitting) one."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
-        for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        text = data.decode("utf-8")
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+            if is_comment:
                 continue
             yield rel, n, line
 
@@ -1499,6 +1710,108 @@ def _check_case_statement(files: dict, kinds: dict, off: list) -> None:
                        f"{line.strip()[:80]}")
 
 
+_FUNC_DEF_MULTI = re.compile(
+    r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\n(.*?)^\}\n",
+    re.MULTILINE | re.DOTALL)
+_FUNC_DEF_SINGLE = re.compile(
+    r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{[ \t]*(.*?)[ \t]*;?[ \t]*\}[ \t]*$",
+    re.MULTILINE)
+_POSITIONAL_IN_STRING = re.compile(r"\$\{?[1-9]")
+
+
+def _iter_function_bodies(text: str):
+    """Yield (name, body, body_start_offset) for every `name() { ... }` in
+    TEXT -- the body on its own lines (closing brace alone on a line) or the
+    whole function on one physical line (`name() { stmt; }`). A single-line
+    match that overlaps an already-yielded multi-line one is skipped."""
+    seen = []
+    for m in _FUNC_DEF_MULTI.finditer(text):
+        seen.append((m.start(), m.end()))
+        yield m.group(1), m.group(2), m.start(2)
+    for m in _FUNC_DEF_SINGLE.finditer(text):
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        yield m.group(1), m.group(2), m.start(2)
+
+
+_SINGLE_LINE_DELEGATE_EXEMPT_WORDS = {
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
+    "until", "do", "done", "function", "return", "local", "declare",
+    "export", "readonly", "unset", "shift", "exit", "break", "continue",
+    "eval", "source", ".", "trap", "set", "builtin", "command", "type",
+    "typeset", "echo", "printf", "read", "test", "true", "false", "time",
+    "exec", "wait",
+}
+
+
+def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) -> None:
+    """#905: a shell function whose whole body is a single call to another
+    function with a positional parameter ($1..$9, ${1}..) spliced into a
+    string argument -- FAIL. claude-directory-publishing triggers.md 14:
+    #899 folded scripts/log.sh's three dispatch reporters into one-liners
+    like `report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"`,
+    and the portal held exactly the three hooks that compile that dispatch
+    in, as COMMAND_SCRIPT_NOT_FOLLOWED. It cleared only once each reporter
+    went back to a self-contained body: its own locals, its own #618
+    flatten, its own writes (#899 r40) -- never delegate a positional splice
+    through another call. A bare "$1" (a named-local-style passthrough) is
+    fine; "$1" spliced into a longer message string is the held shape.
+
+    #980 left this out because it filters an already-extracted
+    function-body *string* (see _iter_function_bodies below), not the raw
+    file by line number, and shared the same bare
+    `ln.lstrip().startswith("#")` comment test as the 16 functions #980
+    routed through _iter_non_heredoc_lines. #990: fixed here by running
+    the extracted body string itself through _iter_non_heredoc_lines --
+    the line numbers reported still come from `n = text[:body_start].
+    count("\n") + 1` below, derived from the function's own start offset
+    in the raw file, which is unaffected by which lines inside the body
+    are heredoc content."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
+            continue
+        # CRLF (or lone CR) would otherwise break both `_FUNC_DEF_MULTI`'s
+        # literal newline anchors and `_FUNC_DEF_SINGLE`'s end-of-line anchor;
+        # normalizing first keeps the newline count (and so the reported
+        # line number) identical to the original file.
+        try:
+            text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeDecodeError:
+            off.append(f"{rel}: not UTF-8, so its function bodies cannot be checked")
+            continue
+        for name, body, body_start in _iter_function_bodies(text):
+            code = [ln for _, ln, is_comment in
+                    _iter_non_heredoc_lines(body, track_heredocs=True)
+                    if ln.strip() and not is_comment]
+            if len(code) != 1:
+                continue
+            line = code[0].strip()
+            first = re.match(r"[^\s()]+", line)
+            first_word = first.group(0) if first else ""
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first_word):
+                continue
+            if first_word in _SINGLE_LINE_DELEGATE_EXEMPT_WORDS:
+                continue
+            quoted = re.findall(r'"[^"]*"', line)
+            spliced_in_string = any(
+                _POSITIONAL_IN_STRING.search(q)
+                and not re.fullmatch(r'"\$\{?[1-9]\}?"', q) for q in quoted)
+            # An unquoted positional (`other_func msg:$1`) is the same held
+            # shape without the quotes -- strip the quoted segments first so
+            # a bare "$1" standing alone as its own argument is still exempt.
+            bare_tokens = re.sub(r'"[^"]*"', "", line).split()
+            spliced_bare = any(
+                _POSITIONAL_IN_STRING.search(t)
+                and not re.fullmatch(r"\$\{?[1-9]\}?", t) for t in bare_tokens)
+            if spliced_in_string or spliced_bare:
+                n = text[:body_start].count("\n") + 1
+                off.append(f"{rel}:{n}: {name} delegates its whole body to "
+                           f"{first_word!r} with a positional parameter spliced "
+                           f"into a string argument -- give it its own locals, "
+                           f"own flatten, own writes: {line[:80]}")
+
+
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
     """#898, round 5: a credential-shaped env-var name as a literal string in
     shipped code (scripts/hooks.d/pipeline), outside CREDENTIAL_NAME_ALLOWLIST
@@ -1511,8 +1824,12 @@ def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
         if kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+        # #980: heredoc tracking only where a `<<WORD` is actually a
+        # heredoc opener (hooks/hooks.d/scripts); "pipeline" is Python,
+        # where the same substring has no heredoc meaning.
+        track_heredocs = top in _SCRIPT_DIRS
+        for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs):
+            if is_comment:
                 continue
             for m in CREDENTIAL_SHAPED_NAME.finditer(line):
                 name = m.group(1)
@@ -1626,8 +1943,12 @@ def _check_credential_fragment_name(files: dict, kinds: dict, reviews: list) -> 
         if rel.endswith(".py"):
             sites = _py_names(text)
         else:
-            sites = ((n, name) for n, line in enumerate(text.splitlines(), 1)
-                     if not line.lstrip().startswith("#") for name in _sh_names(line))
+            # #980: same heredoc-boundary tracker as _check_credential_shaped_name,
+            # for the same reason -- "pipeline" is Python here, scripts are shell.
+            sites = ((n, name)
+                     for n, line, is_comment in _iter_non_heredoc_lines(
+                         text, track_heredocs=top in _SCRIPT_DIRS)
+                     if not is_comment for name in _sh_names(line))
         seen = set()
         for n, name in sites:
             if name in seen or name in CREDENTIAL_FRAGMENT_ALLOWLIST:
@@ -1751,8 +2072,10 @@ def _check_launchers(files: dict, kinds: dict, off: list) -> None:
             except (ValueError, AttributeError, TypeError):
                 commands = []
         for text in commands:
-            for n, line in enumerate(text.splitlines(), 1):
-                if line.lstrip().startswith("#"):
+            # #980: these are hook scripts/commands (shell), heredoc-tracked
+            # the same way the other _SCRIPT_DIRS checkers above are.
+            for n, line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+                if is_comment:
                     continue
                 if LAUNCHER.search(line) or (rel.endswith(".py") and LAUNCHER_PY.search(line)):
                     off.append(f"{rel}:{n}: launcher or package install in a hook "

@@ -144,6 +144,184 @@ def test_a_url_host_in_a_python_comment_also_fails(tmp_path):
     assert any("example.py" in o and "URL host" in o for o in offenders), offenders
 
 
+def test_a_url_host_comment_line_inside_a_heredoc_body_does_not_fail(tmp_path):
+    """#919: a `#`-led line that looks like a URL-host comment is heredoc
+    content, not a real shell comment, once it sits inside the body of a
+    typed `<<EOF ... EOF` heredoc -- this guard must track heredoc
+    boundaries the same way _in_code() already tracks fenced-code state."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_a_url_host_comment_line_outside_the_heredoc_still_fails(tmp_path):
+    """Positive control for the heredoc-boundary test above: the identical
+    `#`-led URL-host line, in the same file, outside any heredoc body, must
+    still fail -- the fix must skip real heredoc content without silencing
+    the guard everywhere else."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"hi\n"
+                           b"EOF\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_bitshift_like_line_in_a_python_file_does_not_suppress_a_later_url_host_comment(
+    tmp_path,
+):
+    """Review finding on #919: the heredoc-opener regex (`<< NAME`) is also the
+    shape of a bitwise left-shift against a named operand (Python, JS) and a
+    C++-style stream-insertion operator -- neither is a heredoc, and Python has
+    no heredoc syntax at all. Heredoc-delimiter tracking must therefore be
+    scoped to hooks/hooks.d/scripts (the only directories that can hold a real
+    one), or this bare bit-shift line would silently disable the URL-host
+    guard for the rest of the file."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": (b"mask = flag << SOME_CONST\n"
+                                 b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("example.py" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_plain_heredoc_closer_with_leading_whitespace_does_not_close_it(tmp_path):
+    """Review finding on #919: an unquoted `<<EOF` heredoc's closing line must be
+    the bare delimiter with no leading/trailing whitespace -- real bash does not
+    treat an indented look-alike as the terminator. `.strip() == delim` would
+    close the heredoc one line early here and then read the real body line that
+    follows (still inside the heredoc, per bash) as an ordinary file line."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"  EOF\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_a_dash_heredoc_closer_with_leading_tabs_still_closes_it(tmp_path):
+    """Positive control for the test above: `<<-EOF` heredocs DO strip leading
+    tabs from the closing line -- the tab-tolerant and whitespace-strict
+    closing paths must not collapse into each other."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<-EOF\n"
+                           b"hi\n"
+                           b"\tEOF\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
+# -- #981: heredoc-open tracking must skip comment lines and quoted text --------
+
+def test_a_heredoc_opener_mentioned_in_a_comment_does_not_disable_the_url_host_guard(
+    tmp_path,
+):
+    """#981: bash never opens a heredoc from inside a `#` comment. A comment
+    line that merely MENTIONS `<<WORD` (explaining a heredoc rewrite, this
+    repo's own convention -- see the #900-round-3 test above) must not leave
+    the tracker "open" and silently swallow every later URL-host comment in
+    the file -- the sibling _check_typed_heredoc already skips comment lines
+    for exactly this reason; this guard's own heredoc tracking did not."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"# was rewritten from cat <<EOF to printf (#898)\n"
+                           b"echo hi\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_heredoc_opener_inside_an_ordinary_quoted_string_does_not_open_one(tmp_path):
+    """#981 addendum: a `<<WORD`-shaped substring sitting inside an ordinary
+    quoted string (not a real heredoc opener) must not open the tracker
+    either -- same mechanism, same silent swallow, for code rather than a
+    comment."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b'echo "see <<EOF in the docs"\n'
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_real_quoted_heredoc_opener_still_opens_one(tmp_path):
+    """Positive control for the test above: the quote-awareness fix must not
+    break detection of a REAL quoted heredoc opener (`<<'EOF'`) -- only a
+    `<<WORD` shape sitting inside an unrelated quoted string earlier on the
+    line."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<'EOF'\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_an_unmatched_apostrophe_before_a_real_opener_does_not_suppress_it(tmp_path):
+    """Review finding on #981: an ordinary English contraction ("it's") with
+    no closing quote on the line must not be read as an open quote that
+    swallows a REAL heredoc opener later on the same line -- a naive
+    quote-toggle scan (flip on any quote char, flip back on the next
+    matching one) gets this wrong, because the single apostrophe never
+    finds a partner and the toggle stays "on" for the rest of the line. The
+    opener must still be detected, so the heredoc body below it (including
+    its `#`-led URL-host-shaped line, which is heredoc content, not a real
+    comment) must not be misread as ordinary file content."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat it's_fine <<EOF\n"
+                           b"hi\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_an_unclosed_heredoc_opener_is_reported(tmp_path):
+    """#981 addendum: an opener that is never closed must be reported rather
+    than silently swallowing the rest of the file -- a FAIL the maintainer
+    can act on instead of a quiet gap."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"hi\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "never closed" in o for o in offenders), offenders
+
+
+def test_a_closed_heredoc_is_not_reported_as_unclosed(tmp_path):
+    """Positive control for the test above: a properly closed heredoc must
+    not trip the new unclosed-opener report."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"hi\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("never closed" in o for o in offenders), offenders
+
+
 # -- network command name at command position (FAIL) -----------------------------
 
 def test_a_network_command_name_at_command_position_fails(tmp_path):

@@ -363,11 +363,28 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 #                       never wired in.
 #   git-backup-notice   after_save/50-git-backup.sh: the backup remote has
 #                       rejected the last N pushes, so memory is committed
-#                       locally and going nowhere, and no retry will fix it.
+#                       locally and going nowhere, and no retry of the SAME
+#                       push will fix it. git_reconcile.enabled being set
+#                       (#935) no longer changes this -- #969 hard-disabled
+#                       60-git-reconcile.sh, so nothing fetches, rebases or
+#                       pushes automatically right now regardless of that
+#                       flag; resolve by hand until #969's real fix lands.
 #   git-restore-notice  before_session_start/50-git-restore.sh: the store has
 #                       DIVERGED from its backup remote, so the memory loaded
-#                       this session is missing what the other machine wrote,
-#                       and nothing will merge or rebase it for you.
+#                       this session is missing what the other machine wrote.
+#                       Nothing here will merge or rebase it for you, and (as
+#                       of #969/#976) that now holds even with
+#                       git_reconcile.enabled set -- 60-git-reconcile.sh is
+#                       hard-disabled, so resolve by hand until it is
+#                       re-enabled.
+#   git-reconcile-notice
+#                       after_save/60-git-reconcile.sh (#903): hard-disabled
+#                       pending #969, so this notice is currently unreachable
+#                       no matter what git_reconcile.enabled says. Once
+#                       re-enabled, a real CONFLICT during the automatic
+#                       rebase onto the remote tip aborts the rebase, changes
+#                       nothing, and names the conflicting file(s) here so
+#                       they can be resolved by hand.
 #   case-divergence-notice
 #                       the SessionStart hook: this store is known by a second
 #                       spelling that differs only in case (#298). Harmless on
@@ -381,7 +398,7 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 # one is deliberately cheap and deliberately rare — this channel interrupts a
 # human mid-thought, and one that fires often is one that gets tuned out.
 NOTICE_MSG=""
-for _notice_name in capture-gap-notice git-backup-notice git-restore-notice case-divergence-notice; do
+for _notice_name in capture-gap-notice git-backup-notice git-restore-notice git-reconcile-notice case-divergence-notice; do
     NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
     [ -f "$NOTICE_FILE" ] || continue
     _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)

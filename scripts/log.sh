@@ -59,11 +59,31 @@ source "$_remember_log_src_dir/lib-memory-dir.sh"
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
+# #902: a REMEMBER_DIR carrying a newline/CR, or not absolute, must never
+# reach mkdir -p -- a directory name CAN legally hold a literal newline, so
+# mkdir never errors on one, it just builds garbage under cwd. Same
+# drive-letter test as lib-memory-dir.sh's own absolute check. A function,
+# not an inline `[[ ]]` at this top-level scope, so `local LC_ALL=C` can
+# scope the bracket range byte-wise (#695) without exporting it past here.
+_remember_log_dir_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+# Refused, NOT returned from: every hook calls log/dispatch/report_error right
+# after sourcing this, and an early `return` leaves them undefined (#912: the
+# SessionStart hook died 127 on a project dir holding a newline, #294). So the
+# mkdir is skipped, log()'s file write goes to /dev/null, and dispatch() skips
+# its own tmp/ mkdir -- the rest of the library is defined as usual.
+_REMEMBER_LOG_SINK=""
+if _remember_log_dir_unsafe; then
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+    _REMEMBER_LOG_SINK=/dev/null
 # `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
 # and re-asking `mkdir` costs a process per hook invocation to learn nothing. The
 # mkdir — and its FATAL — is still exactly what runs when the directory is not
 # there, which is the only case it was ever about.
-if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
@@ -81,8 +101,9 @@ fi
 # `_RCFG_cooldowns_save_seconds=120` — and every later config() call is a
 # parameter expansion. Nothing is written to disk. That is the whole reason
 # this was preferred over caching the merged file at a stable path: that file
-# can carry `haiku.oauth_token`, a live OAuth credential, which is why
-# lib-memory-dir.sh creates it 0600, fresh every invocation, under an EXIT
+# can carry a `haiku.oauth_token` value (an inert config key since #860, but
+# still a user-editable file), which is why lib-memory-dir.sh creates it
+# 0600, fresh every invocation, under an EXIT
 # trap (#68/#429) -- an unpredictable mktemp name until bootstrap-dirs.sh's
 # #362 relocation gives it a private-directory home instead. Collapsing
 # reads must not re-introduce that trade by the back door.
@@ -207,7 +228,8 @@ _config_is_private_path() {
 # must be checked).
 #
 # Deliberately NOT a cache of the raw merged config.json: that file can carry
-# a live `haiku.oauth_token` (lib-memory-dir.sh's own security comment), and
+# a `haiku.oauth_token` value (lib-memory-dir.sh's own security comment --
+# inert since #860, but still a user-editable file), and
 # a persistent copy would extend a secret's on-disk lifetime from "until this
 # process exits" to "until the config next changes" -- real exposure growth
 # for a scratch file that today is deleted at EXIT. The FLATTENED dump is
@@ -288,6 +310,24 @@ _remember_cfg_flatten_cache_path() {
     # that this build never looks at; no version line or migration logic
     # needed inside the file itself.
     printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+}
+
+# #888: the OLD (pre-#864) cache name -- the real path above, minus the
+# literal `-v2-` segment. Nothing ever opens this path; it exists only so
+# _remember_cfg_flatten_cache_publish below can best-effort remove the
+# orphan an install upgrading from <=0.38.0 left behind.
+_remember_cfg_flatten_cache_path_v1() {
+    local _v2 _dir _base
+    _v2=$(_remember_cfg_flatten_cache_path) || return 1
+    # #972: anchor the substitution to the filename's own -v2- segment, not
+    # the first occurrence anywhere in the full path -- a bare `${_v2/-v2-/-}`
+    # over the WHOLE path matches inside ${TMPDIR:-/tmp} itself when that
+    # path happens to contain the literal substring -v2- (e.g.
+    # TMPDIR=/mnt/build-v2-staging/tmp), producing a v1 path that does not
+    # name the real pre-#864 orphan at all.
+    _dir="${_v2%/*}"
+    _base="${_v2##*/}"
+    printf '%s' "${_dir}/${_base/-v2-/-}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -585,6 +625,20 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    # #888: best-effort removal of the pre-#864 orphan (same path as
+    # _remember_cfg_flatten_cache_path_v1 above, derived from $_f directly
+    # to skip a second subshell) left behind by an install that upgraded
+    # across #864 before this fix existed. Harmless either way -- never
+    # required for correctness, same as every other failure path above.
+    # #972: anchor to the basename's own -v2- segment, not the first
+    # occurrence anywhere in the full path -- see the matching comment in
+    # _remember_cfg_flatten_cache_path_v1 above for why a bare substring
+    # substitution over $_f is wrong when ${TMPDIR:-/tmp} itself contains
+    # the literal substring -v2-.
+    local _f_dir="${_f%/*}"
+    local _f_base="${_f##*/}"
+    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
+    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 
@@ -892,7 +946,7 @@ export REMEMBER_PROMPT_STAMP
 # could not replay — which is exactly why #227 skipped it.
 #
 # What is cached is these two SCALARS, never the merged config file. That file
-# can carry `haiku.oauth_token`, which is why lib-memory-dir.sh creates it
+# can carry a `haiku.oauth_token` value, which is why lib-memory-dir.sh creates it
 # 0600, fresh every invocation, under an EXIT trap (#68/#232/#429);
 # publishing it at a stable path to save
 # processes is a trade this repo has already declined once and is not making by
@@ -954,7 +1008,11 @@ unset _remember_log_src_dir
 # missed the first pass, log()'s own timestamp a few lines below was not).
 MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+if [ -n "$_REMEMBER_LOG_SINK" ]; then
+    MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+else
+    MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+fi
 
 # #705: MEMORY_LOG_DATE above is a snapshot, not a subscription -- a process
 # that sources log.sh and then lives across midnight (a long-running
@@ -1094,7 +1152,11 @@ log() {
     fi
     if [ "$_remember_log_rolled" = 1 ]; then
         _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        if [ -n "$_REMEMBER_LOG_SINK" ]; then
+            MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+        else
+            MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        fi
     fi
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
@@ -1711,7 +1773,9 @@ dispatch() {
             # failed compound command, and every caller of dispatch runs under
             # `set -e`. Without it, a store whose tmp/ cannot be created aborts
             # the save outright — the loud failure traded for the quiet one.
-            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            # A REMEMBER_DIR log.sh refused (#902) never reaches mkdir here either.
+            [ -n "$_REMEMBER_LOG_SINK" ] || [ -d "$REMEMBER_DIR/tmp" ] \
+                || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
             # Opened HERE rather than discovered at the redirect. The shell
             # opens a redirection target before running the command and reports
             # its own failure OUTSIDE the scope of that redirect — the #204

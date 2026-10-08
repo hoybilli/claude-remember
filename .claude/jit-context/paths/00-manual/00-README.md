@@ -200,3 +200,246 @@ than an oversight.
   [#816](https://github.com/Digital-Process-Tools/claude-remember/issues/816), which fixed it**
   (both guards now log the malformed value before substituting the default) -- the same stale
   "still true at HEAD" gap as the #804 entry above, corrected here by #827.
+- **`860.codex-fallback-deprecation-wording`** -- declined 2026-10-06, already fixed. The
+  fragment described `pipeline/haiku.py`'s deprecation message for the legacy
+  `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` fallback naming a Claude-Code-only remedy
+  that did not exist for a Codex-hosted operator. Checked against HEAD: the warning this
+  code path now emits (the branch gated on `_AUTH_FAILURE_MARKERS` after an un-isolated
+  retry) reads "log in again with your coding agent's own CLI. This plugin reads no
+  credential of its own any more -- there is no setting here to configure (#129/#131/#860)"
+  -- generic across every host, naming no plugin-specific remedy at all, because the whole
+  recovery-token mechanism this fragment's complaint was about was removed entirely in
+  round 3/4 of #860. No new issue filed.
+- **`860.stale-live-credential-wording-outside-diff`** -- declined 2026-10-06, still true at
+  HEAD for a narrower set of files than the fragment originally named (several other sites
+  it cited, e.g. `docs/configuration.md`, were independently fixed since). `hooks.d/
+  after_save/50-git-backup.sh`, `hooks.d/before_session_start/50-git-restore.sh`,
+  `scripts/lib-memory-dir.sh` and `scripts/log.sh` still describe `haiku.oauth_token` as "a
+  live ... OAuth credential" even though #860 round 4 removed it as an auth source on every
+  host (`docs/configuration.md`'s own current wording: "not read for anything ... there is
+  nothing to migrate it to"). Declined as a rule because the fix is a one-time wording sweep
+  across a known, small file set, not a generalizable lesson. **Filed as
+  [#918](https://github.com/Digital-Process-Tools/claude-remember/issues/918) instead**
+  (together with `894.stale-remember-oauth-token-docs-sweep-gap` below, same root cause).
+- **`870.auth-failure-warning-misattributes-dead-credential`** -- declined 2026-10-06, already
+  fixed. The fragment described the un-isolated-retry auth-failure warning
+  (`pipeline/haiku.py`) blaming "the CLI's own saved login" even when the actually-dead
+  credential was a configured userConfig token, a host-supplied `CLAUDE_CODE_OAUTH_TOKEN` or
+  an ambient `ANTHROPIC_API_KEY`. Checked against HEAD: the warning no longer names or blames
+  any specific credential source at all -- it says the CLI's saved login has expired and that
+  "this plugin reads no credential of its own any more," because #860 round 3/4 removed the
+  userConfig recovery-token mechanism the misattribution was about. **Issue
+  [#890](https://github.com/Digital-Process-Tools/claude-remember/issues/890), filed for this
+  same finding before this curation pass, appears to already be fixed by the same change --
+  worth a maintainer look at closing it.** No new issue filed here.
+- **`875.readme-cache-disclosure-names-old-filename`** -- declined 2026-10-06, **fixed by
+  [#888](https://github.com/Digital-Process-Tools/claude-remember/issues/888), checked at the
+  commit that landed it.** Originally: `README.md`'s `$TMPDIR/remember-*` disclosure named the
+  pre-`v2` filename (`remember-config-cache-<key>`) while `scripts/log.sh` had written
+  `remember-config-cache-v2-<key>` since #864 changed the cache format (#875 was the follow-up
+  PR that landed #864's fix, not the format bump itself). README now names the real `v2`
+  filename and the cache publisher best-effort removes a leftover pre-`v2` orphan on write.
+  Declined as a rule at the time because the fix was a one-line README correction, not a
+  generalizable lesson -- that stands; this entry is kept only as a closed record, not reopened.
+- **`891.lib-lock-eval-new-hits`** -- declined 2026-10-06, already fixed. The fragment
+  described `check_release_tree.py`'s widened `EVAL_OF_SUBSTITUTION` pattern newly flagging
+  `scripts/lib-lock.sh`'s own `eval "_LOCK_TIMING_T0_${KEY}=..."` shape, untriaged. Checked
+  against HEAD: `scripts/lib-lock.sh` no longer uses `eval` for this at all -- the lock-timing
+  state is now kept in bash arrays (`_LOCK_TIMING_T0S`, `_LOCK_TIMING_WAITS`, etc.), with a
+  comment reading "#898 round 10: no `eval`, no variable named at run time." `.github/
+  release-branch.json`'s deny-list never needed the file. No new issue filed.
+- **`894.doctor-notice-grep-is-history-not-presence`** -- declined 2026-10-06, already fixed.
+  The fragment described `doctor.sh`'s "legacy recovery-token config in use" section deciding
+  presence by grepping daily-log history for a `NOTICE:` substring rather than checking
+  current state, with both a stale-warning-after-migration and a false-all-clear failure
+  mode. Checked against HEAD: the whole section is gone -- `scripts/doctor.sh`'s own comment
+  reads "#898, round 4: the 'Legacy recovery-token config (#860)' section that used to live
+  here is removed entirely," consistent with the underlying mechanism (`REMEMBER_OAUTH_TOKEN`
+  / `haiku.oauth_token`) itself being fully removed by the same round. No new issue filed.
+- **`894.stale-remember-oauth-token-docs-sweep-gap`** -- declined 2026-10-06, still true at
+  HEAD for two of the five files the fragment originally named (`docs/configuration.md`,
+  `docs/verification.md` and `docs/diagnostics.md` were independently fixed since; the
+  fragment's own `docs/diagnostics.md:16` concern is now resolved by an explicit "#898 round
+  15" addendum right below it). `docs/git-backup-security.md` and
+  `docs/external-storage-mode.md` still tell users to set `REMEMBER_OAUTH_TOKEN` as a working
+  mitigation, when the var authenticates nothing on any host. Declined as a rule for the same
+  reason as `860.stale-live-credential-wording-outside-diff` above. **Filed as
+  [#918](https://github.com/Digital-Process-Tools/claude-remember/issues/918) instead**
+  (same issue as that entry -- one root cause, one sweep).
+- **`896.readme-overstates-token-isolation`** -- declined 2026-10-06, already fixed. The
+  fragment described README.md overstating the userConfig recovery token's isolation
+  ("only this plugin's own save can read it back") against `pipeline/haiku.py:_child_env`'s
+  actual strip list. Checked against HEAD: that README sentence no longer exists, and
+  `CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN` is no longer read anywhere in `pipeline/` -- the whole
+  userConfig recovery-token mechanism was removed in #860 round 4, so the isolation claim
+  the fragment questioned has nothing left underneath it to overstate. No new issue filed.
+- **`898.legacy-token-presence-check-swallows-read-errors`** -- declined 2026-10-06, already
+  fixed, per the fragment's own addendum. `_legacy_recovery_token_configured()` and its
+  caller were deleted entirely in #898 round 4 (commit `3b93c53`), not patched -- the
+  underlying read-error-swallowing behaviour this fragment described has no code left to
+  misreport from. No new issue filed.
+- **`898.url-in-comment-guard-heredoc-body-false-positive`** -- declined 2026-10-06, still
+  true at HEAD: `.github/scripts/check_release_tree.py`'s `_check_url_in_comment` still has
+  no heredoc-boundary tracking, unlike the sibling `_in_code()` helper it could reuse the
+  shape of. Re-confirmed not live today (a repo-wide grep for a `#`-prefixed line with a URL
+  host inside any heredoc body still returns zero hits). Declined as a rule because the fix
+  is a scoped addition to one checker function, not a generalizable lesson. **Filed as
+  [#919](https://github.com/Digital-Process-Tools/claude-remember/issues/919) instead.**
+- **`902.changelog-overclaims-mkdir-guard-coverage`**,
+  **`902.remember-dir-guard-fatal-swallowed`** and
+  **`902.remember-dir-guard-refuses-unc-store`** -- declined 2026-10-06, all three still true
+  at HEAD. All three describe gaps in the same #902 `REMEMBER_DIR` safety guard:
+  `scripts/bootstrap-dirs.sh` still builds the exact directory tree the guard exists to
+  refuse, with no check of its own, before the guard ever runs on the slow path;
+  `scripts/post-tool-hook.sh`/`scripts/log.sh` still route the guard's own FATAL through
+  `log()`, which has already pointed `MEMORY_LOG_FILE` at `/dev/null` by the time it fires,
+  so the refusal reaches nowhere a user can read it; and `scripts/resolve-paths.sh`'s
+  `_remember_normalize_win_path` still only recognises drive-letter and `/c/`-style Windows
+  paths, so a native UNC project directory is itself misclassified as unsafe and refused.
+  Declined as a rule because the fix for each is a scoped change to one existing guard, not a
+  generalizable lesson, and all three are different facets of the same shipped feature.
+  **Filed as [#920](https://github.com/Digital-Process-Tools/claude-remember/issues/920)
+  instead**, covering all three.
+- **`879.wrapper-grant-missing-command-builtin`** and **`879.wrapper-grant-spellings-missed`** --
+  declined 2026-10-07, both still true at HEAD. `.github/scripts/check_release_tree.py`'s
+  `_UNSCOPED_COMMANDS` set (lines 840-851) still lacks `command`, `nice` and `stdbuf`, and the
+  `..` path-escape check at line 876 still only splits on forward slash, missing a
+  backslash-separated escape -- confirmed directly against `bash_grant_problem`. Declined as a
+  rule because the fix is the same list/check-widening shape #866/#879 already established, not
+  a new lesson. **Filed as
+  [#950](https://github.com/Digital-Process-Tools/claude-remember/issues/950) instead,
+  consolidating both.**
+- **`913.windows-cygpath-test-skip`** -- declined 2026-10-07, already documented. The fragment's
+  concern (`tests/test_session_dir_cache_913.py` skips on win32, so "CI passed on windows-latest"
+  verifies nothing about the fix's actual cygpath-avoidance claim there) is already recorded
+  verbatim in `docs/windows-skip-triage.md`'s own row for that file ("the fix's cygpath-avoidance
+  claim is verified only against a POSIX stub cygpath, not a native one"). No new rule and no new
+  issue: the existing per-module verdict list already carries this exact caveat.
+- **`932.ndc-gen-not-bumped-on-conflict-path`** -- declined 2026-10-07, still true at HEAD:
+  `hooks.d/after_save/60-git-reconcile.sh`'s conflict path still never calls
+  `_grc_bump_ndc_gen`, unlike the fast-forward and successful-rebase paths. Declined as a rule
+  because the fix is a single missing call site, not a generalizable lesson. **Filed as
+  [#954](https://github.com/Digital-Process-Tools/claude-remember/issues/954) instead.**
+- **`933.fast-path-test-does-not-confirm-fast-path-ran`** -- declined 2026-10-07, still true at
+  HEAD: the fast-path test in `tests/test_autonomous_log_retention_487.py` still has no positive
+  evidence `_remember_auto_ref` was actually built by `mktemp`, unlike its sibling fallback test.
+  Declined as a rule because the fix is an assertion/marker addition across one test file's
+  existing tests, not a new lesson -- the closest generalizable lesson here (confirming which
+  code path a test exercises, not just that its output is correct) is adjacent to but distinct
+  from this repo's existing "pair a must-not-fire assertion with a must-fire one" convention, and
+  one incident is not enough to justify a second, overlapping rule. **Filed as
+  [#951](https://github.com/Digital-Process-Tools/claude-remember/issues/951) instead.**
+- **`939.reconcile-abort-exit-status-unchecked`** -- declined 2026-10-07, already fixed. The
+  fragment described the old `git rebase --abort ... || true` (unchecked exit status) at the
+  pre-#945 version of `60-git-reconcile.sh`. At current HEAD, the conflict path no longer calls
+  `--abort` at all -- commit 84a6ea5 (#945) replaced it with `if git -C "$REPO_ROOT" rebase
+  --quit >/dev/null 2>&1; then ...`, which does check the exit status via the `if` itself. No new
+  issue.
+- **`939.reconcile-foreign-commit-dropped-by-abort`** -- declined 2026-10-07, already fixed /
+  superseded. The fragment's exact mechanism (`git rebase --abort` resetting the whole tracked
+  tree and dropping a foreign commit with it) no longer applies: commit 84a6ea5 (#945) removed
+  the `--abort` call from the live conflict path entirely, replacing it with `rebase --quit` (which
+  does not reset the working tree) plus a scoped checkout. A related-but-different scoping gap in
+  that replacement is already tracked separately as part of
+  [#952](https://github.com/Digital-Process-Tools/claude-remember/issues/952) (the
+  restore-scoped-to-slug finding below). No new issue filed for this fragment specifically.
+- **`945.reconcile-autostash-not-disabled-for-rebase`**, **`945.reconcile-restore-scoped-to-slug-not-rebase-paths`**
+  and **`945.reconcile-symbolic-ref-uses-configured-not-actual-branch`** -- declined 2026-10-07,
+  all three still true at HEAD. All three are regressions introduced by commit 84a6ea5 (#945)'s
+  `rebase --quit`-based rewrite of `60-git-reconcile.sh`'s conflict path: no `--no-autostash` at
+  either rebase call site, the scoped restore assuming every replayed commit is confined to
+  `$SLUG/`, and `git symbolic-ref HEAD refs/heads/$BRANCH_NAME` restoring to the configured
+  branch rather than the rebase's own recorded head-name. Declined as a rule because each fix is
+  a scoped change to one already-identified function, not a generalizable lesson (the
+  generalizable half -- a notice claiming a tree state it never checked -- is promoted
+  separately as `hook-notice-must-not-claim-unverified-tree-state.md` in this same layer). **Filed
+  as [#952](https://github.com/Digital-Process-Tools/claude-remember/issues/952) instead,
+  consolidating all three.**
+- **`946.rebase-in-progress-collapses-could-not-tell-into-nothing-there`** -- declined 2026-10-07,
+  still true at HEAD: `_grc_rebase_in_progress` still returns a plain false both when no rebase is
+  in progress and when the underlying `git rev-parse --git-path` call itself fails, across all of
+  its call sites. Declined as a rule because the open question is a design decision (whether the
+  undetermined case should behave like "in progress" or surface its own log line), not a lesson a
+  standing rule would teach anyone away from. **Filed as
+  [#953](https://github.com/Digital-Process-Tools/claude-remember/issues/953) instead.**
+- **`888.v1-path-substitution-can-hit-tmpdir`** -- declined 2026-10-07. Still true at HEAD:
+  `scripts/log.sh`'s `_remember_cfg_flatten_cache_path_v1()` (line 322) and the inline cleanup in
+  `_remember_cfg_flatten_cache_publish()` (line 625) both still derive the v1 orphan-cache path via
+  a bare `${var/-v2-/-}` substring substitution, unanchored to the slug segment, confirmed by
+  reading both call sites. Declined as a rule because the fix (anchor to the basename) is a
+  two-call-site, one-shape fix, not a generalizable lesson. **Filed as
+  [#972](https://github.com/Digital-Process-Tools/claude-remember/issues/972) instead.**
+- **`913.session-dir-cache-keyed-on-wrong-var`** -- declined 2026-10-07. Still true at HEAD:
+  `scripts/post-tool-hook.sh`'s SESSION_DIR cache still keys on `MEMORY_PROJECT_DIR` (shared across
+  worktrees) while caching a value computed from `$PROJECT` (worktree-specific), confirmed by
+  reading both the key assignment (~line 534) and the value computation (~line 553). Declined as a
+  rule because the fix is a one-line key change at a single cache site, not a generalizable lesson.
+  **Filed as [#973](https://github.com/Digital-Process-Tools/claude-remember/issues/973) instead.**
+- **`918.untrack-receipt-lost-rotate-credential-advice`** -- declined 2026-10-07. Still true at
+  HEAD: `hooks.d/after_save/50-git-backup.sh`'s untrack receipt (~line 627) still has no
+  rotate-the-credential sentence, confirmed by reading the line. Declined as a rule because the fix
+  is restoring one sentence to one log line, not a generalizable lesson. **Filed as
+  [#974](https://github.com/Digital-Process-Tools/claude-remember/issues/974) instead.**
+- **`951.pr960-macos-reconcile-903-not-reproducible-locally`** -- declined 2026-10-07, stale. This
+  fragment investigated a macOS-only CI flake in `tests/test_git_reconcile_903.py` on PR #960
+  (closed, superseded by #962). The file and the hook it tests have both been substantially
+  rewritten since (#966's TOCTOU fix, #969/#970's hard-disable) -- the specific failure signature
+  this fragment described is no longer reproducible against the current tree, and the investigation
+  itself names no generalizable lesson (a reasoned-not-confirmed guess between CI-ordering and a
+  platform git-config quirk). No issue filed; a fresh investigation would need to start from the
+  current tree, not this one's evidence.
+- **`952.diff-name-only-errors-swallowed-checkout-ok-stays-set`**,
+  **`952.quotepath-breaks-restore-set-matching`**, **`953.only-one-call-site-tests-rc2`** and
+  **`966.residual-race`** -- declined together 2026-10-07. All four describe defects in
+  `hooks.d/after_save/60-git-reconcile.sh`'s rebase/restore code, which is now hard-disabled
+  unconditionally (#969/#970) -- the code these four describe is unreached while the kill switch
+  stands, confirmed still present (unreached, not removed) by reading the relevant lines and
+  call sites at HEAD. Declined as individual rules because each is a scoped, single-function fix
+  rather than a generalizable lesson, and consolidated into one pre-re-enable checklist rather than
+  four separate issues since all four gate the same future event (re-enabling this hook). **Filed
+  as [#975](https://github.com/Digital-Process-Tools/claude-remember/issues/975) instead.**
+- **`969.kill-switch-notice-pollutes-hook-errors-log-for-disabled-users`** and
+  **`969.stale-reconcile-prose-not-updated`** -- declined together 2026-10-07. Both still true at
+  HEAD: the kill-switch notice in `60-git-reconcile.sh` still writes to `hook-errors.log`
+  unconditionally for every user before the `git_reconcile.enabled` read (confirmed by reading
+  line 102), and `50-git-backup.sh` / `hooks.d/before_session_start/50-git-restore.sh` still
+  promise the disabled hook will "fetch, rebase and push this automatically" (confirmed by reading
+  both notices). Declined as a rule because both are scoped fallout from one landed change (the
+  #969/#970 hard-disable), not a generalizable lesson, and consolidated into one issue since both
+  share that same root cause. **Filed as
+  [#976](https://github.com/Digital-Process-Tools/claude-remember/issues/976) instead.**
+- **`974.untrack-rotate-advice-third-sibling`** -- declined 2026-10-08, still true at HEAD:
+  `hooks.d/after_save/50-git-backup.sh:630`'s "could not untrack" branch of the config.json/logs/tmp
+  untrack block still has no rotate-credential advice, unlike its two sibling branches (lines 624
+  and 627) which #974/PR #987 already fixed. Declined as a rule because the fix is copying the same
+  one-sentence rotate-advice addition already applied to the other two branches, not a generalizable
+  lesson. **Filed as [#989](https://github.com/Digital-Process-Tools/claude-remember/issues/989)
+  instead.**
+- **`980.deferred-checkers-no-followup-issue`** -- declined 2026-10-08, still true at HEAD:
+  `_check_catch_all_in_loop` and `_check_single_line_delegate_positional`
+  (`.github/scripts/check_release_tree.py`) still carry docstrings claiming the heredoc-body
+  comment-test gap was "filed for a follow-up rather than fixed silently alongside the other 16," and
+  no such issue existed (checked by issue search for both function names, and again during this
+  curate pass). Declined as a rule because the fix is either routing both functions through
+  heredoc-aware tracking (the same shape #919/#980 already applied to 16 siblings) or softening the
+  docstring wording -- not a new lesson. **Filed as
+  [#990](https://github.com/Digital-Process-Tools/claude-remember/issues/990) instead.**
+- **`981.heredoc-quote-scan-is-escape-blind`** -- declined 2026-10-08, still true at HEAD:
+  `_in_quotes_before`'s `_QUOTED_SPAN` regex (`.github/scripts/check_release_tree.py:217`) still has
+  no backslash-escape awareness, so a backslash-escaped quote inside a quoted string closes the
+  matched span one character early and a real heredoc-opener-shaped substring right after it can be
+  misreported as not-in-quotes. Confirmed pre-existing (the same wrong answer predates the
+  quote-awareness rewrite #981 itself made). Declined as a rule because real escape-aware shell quote
+  parsing is a materially bigger change than this file's other deliberately-cheap heuristics, held
+  for a second independent report rather than built pre-emptively against one observed edge case.
+  **Filed as [#991](https://github.com/Digital-Process-Tools/claude-remember/issues/991) instead.**
+- **`989.pre-commit-hook-script-crlf-write-text`** -- declined 2026-10-08, still true at HEAD:
+  `tests/test_git_backup_rotate_advice_974.py:154`'s `pre_commit.write_text("#!/bin/sh\nexit 1\n")`
+  still carries no `newline=""` guard, so Python's default text-mode newline translation would
+  rewrite the shebang to CRLF on Windows and could make some shebang parsers misread the interpreter
+  path. Inert today: the whole test file's `pytestmark` still skips `sys.platform == "win32"` for an
+  unrelated reason (#79), and CI's matrix confirms `windows-latest` is exactly the leg that skip
+  exempts, so nothing exercises the CRLF path either way. Declined as a rule because the fix (add
+  `newline="\n"`, or write via `open(path, "wb")`) is a one-line-shaped fix scoped to this test, not
+  a generalizable lesson. **Filed as
+  [#994](https://github.com/Digital-Process-Tools/claude-remember/issues/994) instead.**

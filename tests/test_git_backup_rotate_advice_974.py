@@ -1,0 +1,237 @@
+"""#974 -- the #719 untrack receipt lost its rotate-the-credential advice.
+
+Commit 73c77f8 (#918) reworded `docs/git-backup-security.md` SS4's stale
+`haiku.oauth_token` wording, and in the same commit the hook's own untrack
+receipt (`hooks.d/after_save/50-git-backup.sh`, logged when a legacy
+`$SLUG/config.json` is untracked) lost its "rotate that credential" sentence.
+The doc still told a reader to rotate; the one place a user actually learns
+their config.json was committed to history did not.
+
+Paired with a positive control (an ordinary backup, no legacy config.json)
+so a harness that always logs the rotate sentence -- or logs nothing at all
+either way -- could not pass both (CLAUDE.md: a negative assertion needs a
+positive control).
+"""
+
+import sys
+import unittest.mock
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_git_backup_hook import (
+    _git,
+    _make_config,
+    _run_hook,
+    make_external_remember_repo,
+    wait_for_lock_release,
+)
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hook subprocess + POSIX flock/git semantics - not portable to Windows runners (#79)",
+)
+
+
+def _write_fail_hook(hooks_dir: Path) -> Path:
+    """Write a `pre-commit` hook that always exits 1, forcing
+    `_gb_commit_untrack`'s `git commit` to fail so the "could not untrack"
+    branch fires.
+
+    Written via `open(..., newline="\\n")`, never `Path.write_text()`:
+    `write_text()`'s default `newline=None` applies universal-newline
+    translation on write, turning every `\\n` into `os.linesep` -- `\\r\\n`
+    on Windows -- which corrupts the shebang line into a "bad interpreter"
+    exec failure (same mechanism, same fix, as
+    `tests/test_autonomous_log_retention_487.py`'s `_write_shell_script`,
+    CI PR #960, windows-latest). This file's own win32 skip above means
+    that specific breakage is inert here, but the write is still fixed to
+    the safe pattern (#994) rather than left as a trap for whoever narrows
+    or removes that skip.
+    """
+    pre_commit = hooks_dir / "pre-commit"
+    with open(pre_commit, "w", newline="\n", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    pre_commit.chmod(0o755)
+    return pre_commit
+
+
+def test_fail_hook_writer_never_uses_path_write_text(tmp_path):
+    """Regression pin for #994: `_write_fail_hook` must go through
+    `open(..., newline="\\n")`, never `Path.write_text()`, whose default
+    `newline=None` applies universal-newline translation and can corrupt
+    the shebang line on Windows. Pins the *call*, not the output bytes --
+    `os.linesep` is "\\n" on every platform this suite can exercise
+    locally, so the corrupted bytes this bug produces on Windows would
+    not appear here even without the fix, which is exactly why the call
+    itself has to be pinned instead."""
+    hooks_dir = tmp_path / "hooks"
+    hooks_dir.mkdir()
+    with unittest.mock.patch.object(
+        Path,
+        "write_text",
+        side_effect=AssertionError(
+            "pre-commit hook written via Path.write_text(), not open(newline='\\n')"
+        ),
+    ):
+        pre_commit = _write_fail_hook(hooks_dir)
+    assert pre_commit.read_bytes() == b"#!/bin/sh\nexit 1\n"
+    assert pre_commit.stat().st_mode & 0o777 == 0o755
+
+
+def _memory_log_text(remember_slug_dir: Path) -> str:
+    log_files = list((remember_slug_dir / "logs").glob("memory-*.log"))
+    assert log_files, "no memory-*.log written at all"
+    return "\n".join(f.read_text() for f in log_files)
+
+
+class TestUntrackReceiptCarriesRotateAdvice:
+
+    def test_legacy_config_json_untrack_logs_rotate_advice(self, tmp_path):
+        """Untracking a legacy config.json must tell the user to rotate the
+        credential it may have carried -- the same advice
+        docs/git-backup-security.md SS4 gives, now missing from the one
+        receipt a user actually sees."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "legacy-slug-974"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        (slug_dir / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-OLD-SECRET"}}'
+        )
+        # Simulate a pre-#719 backup: commit config.json alongside memory directly.
+        _git(remember, ["add", "--", f"{slug}/"])
+        _git(remember, ["commit", "-q", "-m", "auto: legacy commit with config.json"])
+
+        # Write new memory so the next backup has something to commit.
+        (slug_dir / "now.md").write_text("## 11:00 | test\nMore memory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "untracked" in log_text and "config.json" in log_text, log_text
+        assert "rotate" in log_text.lower(), (
+            "untrack receipt must advise rotating a credential config.json "
+            f"may have carried: {log_text}"
+        )
+
+    def test_deferred_untrack_with_staged_changes_also_logs_rotate_advice(self, tmp_path):
+        """Self-review finding (#974 follow-up): the DEFERRED branch -- a
+        legacy config.json is tracked but this store also has staged
+        changes, so the untrack commit is left for the next backup -- is
+        reached under the exact same git-history fact as the succeeded
+        branch above (the credential is already committed either way) and
+        must give the same rotate advice, not stay silent until a later
+        save happens to untrack it cleanly."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "legacy-slug-974-deferred"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        (slug_dir / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-OLD-SECRET"}}'
+        )
+        # Simulate a pre-#719 backup: commit config.json alongside memory directly.
+        _git(remember, ["add", "--", f"{slug}/"])
+        _git(remember, ["commit", "-q", "-m", "auto: legacy commit with config.json"])
+
+        # Stage a change directly in the index (not via the hook) so the
+        # hook finds the index dirty and takes the DEFERRED branch instead
+        # of the succeeded one.
+        (slug_dir / "now.md").write_text("## 11:00 | test\nMore memory.\n")
+        _git(remember, ["add", "--", f"{slug}/now.md"])
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "left for the next backup" in log_text, log_text
+        assert "rotate" in log_text.lower(), (
+            "the deferred-untrack receipt must also advise rotating a "
+            f"credential config.json may have carried: {log_text}"
+        )
+
+    def test_could_not_untrack_also_logs_rotate_advice(self, tmp_path):
+        """#989 follow-up to #974: the COULD-NOT-UNTRACK branch -- `git rm
+        --cached` or `_gb_commit_untrack` fails, so the index is restored and
+        the next backup retries -- is reached under the exact same
+        git-history fact as the succeeded and deferred branches above (the
+        credential is already committed either way) and must give the same
+        rotate advice, not stay silent just because this attempt failed.
+
+        Forces the failure with a `pre-commit` hook in the remember repo
+        that always exits non-zero, so `_gb_commit_untrack`'s `git commit`
+        fails and the untrack block's `else` branch (line 630) fires --
+        without requiring root or any filesystem permission trick.
+        """
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "legacy-slug-989-could-not"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        (slug_dir / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-OLD-SECRET"}}'
+        )
+        # Simulate a pre-#719 backup: commit config.json alongside memory directly.
+        _git(remember, ["add", "--", f"{slug}/"])
+        _git(remember, ["commit", "-q", "-m", "auto: legacy commit with config.json"])
+
+        # Write new memory so the next backup has something to commit.
+        (slug_dir / "now.md").write_text("## 11:00 | test\nMore memory.\n")
+
+        # Block every commit in this repo so `_gb_commit_untrack` fails and
+        # the untrack block takes its "could not untrack" else branch.
+        hooks_dir = remember / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        _write_fail_hook(hooks_dir)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "could not untrack" in log_text, log_text
+        assert "rotate" in log_text.lower(), (
+            "the could-not-untrack receipt must also advise rotating a "
+            f"credential config.json may have carried: {log_text}"
+        )
+
+    def test_ordinary_backup_does_not_log_rotate_advice(self, tmp_path):
+        """Positive control: an ordinary backup with no legacy config.json
+        must NOT trip the rotate-advice sentence -- pairing the "must fire"
+        case above with a "must not fire" one, since a harness that always
+        logs the sentence would otherwise pass the assertion above too."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "ordinary-slug-974"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nSome memory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "rotate" not in log_text.lower(), log_text

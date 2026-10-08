@@ -31,8 +31,10 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,6 +57,185 @@ pytestmark = pytest.mark.skipif(
     BASH is None,
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
+
+
+def _write_shell_script(path: Path, text: str) -> None:
+    r"""Writes a `#!/bin/sh` (or bash) script via `open(..., newline="\n")`,
+    never `Path.write_text()` (CI, PR #960, windows-latest jobs
+    112746585138/.../152 then 112755717371: `Path.write_text()`'s default
+    `newline=None` applies universal-newline translation on write, turning
+    every `\n` in the content into `os.linesep` -- `\r\n` on Windows. A
+    CRLF-corrupted shebang line is a classic "bad interpreter" exec
+    failure: the loader reads `#!/bin/sh\r`, fails to resolve that as a
+    path, and the script never starts at all -- indistinguishable from
+    the shim simply not existing, which is exactly `mktemp_shim_log`
+    reading back empty on every statement, not just a later one, that
+    was observed). `Path.write_text()` DOES take a `newline=` keyword,
+    but only since Python 3.10 -- this repo's own CI matrix still runs
+    3.9, so that keyword is not available here; `open(..., newline="\n")`
+    is, on every version this suite runs on, and is the same mechanism
+    `_run_bash_script` below already uses for the identical reason."""
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _bash_path_prepend(dirs) -> str:
+    r"""Builds a bash `:`-joined PATH-prefix string from one or more native
+    directories, meant to be spliced into the SCRIPT TEXT a generated
+    script exports its own `$PATH` from (`export PATH="<this>:$PATH"`) --
+    never into `env["PATH"]`, the dict `_run_bash_script` hands to
+    `subprocess.run` (#951).
+
+    `env["PATH"]` stays Windows-native (`;`-joined, drive-letter paths)
+    right up until CreateProcess hands it to `bash.exe`; whether MSYS's
+    own startup conversion into bash's internal, `:`-joined $PATH
+    succeeds for an entry THIS PROCESS prepended is outside Python's
+    control and not reproducible on a non-Windows runner. The drive
+    letter's own colon is PATH's own separator once that string is
+    POSIX-split, so merely forward-slashing a prepended directory
+    (`_grc_posix`, used elsewhere in this file for the shim's OWN
+    embedded paths -- each a single `open()`/exec target, where a drive
+    letter's colon is harmless) does not help here: locally confirmed
+    (`/tmp` simulation, trap.d/951) that bash's native colon-splitting
+    shreds a `C:\...;C:\...` PATH value and a `C:/...;C:/...` one
+    IDENTICALLY, into components none of which resolve, regardless of
+    slash direction -- which is also why PR #960's two prior attempts
+    (forward-slashing shim content, then fixing shebang newlines) left
+    the symptom byte-for-byte unchanged. The one form with no embedded
+    colon at all is bash's own MSYS convention (`/c/Users/...`), built
+    here in Python and hand-written into the script as literal bash
+    source, so it needs no env-block conversion to already be correct --
+    on every other platform this repo tests on, a path already has no
+    drive letter and this is a no-op forward-slash normalisation.
+    """
+
+    _EXTENDED_LENGTH_PREFIX = ("\\" * 2) + "?" + "\\"
+
+    def _to_posix(d) -> str:
+        s = str(d)
+        # Self-review finding (oss:auditor): an extended-length Windows
+        # path (two backslashes, then "?", then one backslash, then the
+        # drive letter -- "\\?\\C:\\...") has a backslash, not a colon,
+        # at s[1], so the drive-letter branch below would never fire
+        # for one and it would fall straight to the bare forward-slash
+        # branch -- still carrying the drive letter's own colon two
+        # characters further in, i.e. the exact shredding failure this
+        # helper exists to avoid. Stripped before the drive-letter
+        # check so both forms convert identically; reasoned, not
+        # observed -- no Windows access to confirm whether
+        # `tempfile.mkdtemp()` ever actually returns one of these on a
+        # CI runner.
+        s = s.removeprefix(_EXTENDED_LENGTH_PREFIX)
+        if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+            tail = s[2:].replace("\\", "/")
+            if not tail.startswith("/"):
+                tail = "/" + tail
+            return f"/{s[0].lower()}{tail}"
+        return s.replace("\\", "/")
+
+    joined = ":".join(_to_posix(d) for d in dirs)
+    # Self-review finding (Explore): this value is spliced into the
+    # generated script as `export PATH="<this>:$PATH"` -- a DOUBLE-
+    # QUOTED bash string, unlike every other dynamic value this file
+    # embeds (REMEMBER_DIR, retention_days), which already go through
+    # `shlex.quote`. A literal `"`, `` ` `` or `$` surviving into this
+    # string would break out of that quoting or trigger command/
+    # variable substitution in the generated script. None of this
+    # file's own call sites can produce one today (pytest `tmp_path`
+    # dirs), but escaping it here costs nothing and matches the
+    # convention every other embedded value already follows.
+    return (
+        joined.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+    )
+
+
+def test_bash_path_prepend_strips_the_drive_letters_own_colon():
+    """#951: a test that would have caught both prior, reasoned-but-wrong
+    fix attempts in this PR (forward-slashing the shim's own content,
+    then fixing the shim's shebang newline) -- NEITHER touches how PATH
+    is built, which is where the reporter's CI symptom (the shim never
+    invoked at all, not even its own first `echo`) actually originates.
+
+    Platform-independent in what it exercises -- `_bash_path_prepend`'s
+    string transform itself, not bash's own MSYS startup conversion,
+    which cannot be reproduced outside a real Windows runner (not
+    something this fix claims to verify; see the PR body for what
+    remains reasoned rather than observed). Self-review finding
+    (oss:auditor): this test does NOT in fact run on every leg -- it
+    still inherits this module's own `pytestmark = skipif(BASH is
+    None, ...)` above, even though its own assertions need no bash at
+    all, because that skip is applied once for the whole module rather
+    than per-test. On every leg this repo's CI currently runs, bash is
+    present (that is the whole premise `pytestmark`'s own comment
+    gives), so the skip never actually fires here today; restructuring
+    the module-wide skip to exempt this one test is a wider change
+    than this fix's own scope and is left to a future pass.
+    """
+    # A bare forward-slash of a Windows-native path (the fix ALREADY
+    # shipped, twice, in this same file, for the shim's own embedded
+    # paths and log target) still carries the drive letter's own colon
+    # -- the exact character PATH's own POSIX `:`-splitting treats as a
+    # separator, shredding the value regardless of slash direction.
+    forward_slashed_only = r"C:\Users\runneradmin\AppData\Local\Temp\x".replace("\\", "/")
+    assert ":" in forward_slashed_only, (
+        "fixture assumption broken -- a forward-slashed Windows path is "
+        "expected to still carry the drive letter's colon"
+    )
+
+    posix = _bash_path_prepend([r"C:\Users\runneradmin\AppData\Local\Temp\remember-mktemp-marker-abc"])
+    assert posix == "/c/Users/runneradmin/AppData/Local/Temp/remember-mktemp-marker-abc", (
+        f"expected the MSYS-style posix form with no embedded colon, got {posix!r}"
+    )
+    assert ":" not in posix, (
+        "#951: a colon survived the conversion -- PATH's own separator "
+        f"would still shred this value under bash's native splitting: {posix!r}"
+    )
+
+    # Must fire: a path that already has no drive letter (every path on
+    # macOS/Linux, where this repo's own CI legs run this same helper)
+    # is a no-op forward-slash normalisation, not mangled by the
+    # drive-letter branch -- a positive control pairing the negative
+    # assertions above, per this repo's own testing rule.
+    already_posix = _bash_path_prepend(["/tmp/already/posix/dir"])
+    assert already_posix == "/tmp/already/posix/dir", (
+        f"a path with no drive letter must pass through unchanged, got {already_posix!r}"
+    )
+
+    multi = _bash_path_prepend([r"C:\a", r"C:\b"])
+    assert multi == "/c/a:/c/b", (
+        f"multiple directories must join with ':' once each is already "
+        f"colon-free, got {multi!r}"
+    )
+
+
+def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
+    """Runs `script` under BASH by writing it to a real file and invoking
+    `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
+    CI job 112366941574): on windows-latest, the extracted housekeeping
+    block's own generated script -- several times longer than the block
+    it replaced -- was silently TRUNCATED when passed as a single `-c`
+    argument (confirmed by the reported error itself: an `if` opened on
+    line 131 hit EOF at line 133, two lines later, nowhere near the
+    block's real closing `fi`/`done`/`unset` thirty-odd lines further
+    down) -- a known class of bug when a non-MSYS parent process (Python)
+    launches MSYS/Git-Bash's bash.exe directly via CreateProcess, which
+    is not MSYS-aware and does not go through MSYS's own argv marshaling.
+    A real script FILE sidesteps the whole command-line-argument path;
+    `bash -c` is not used again anywhere else in this file.
+    """
+    fd, path = tempfile.mkstemp(suffix=".sh")
+    try:
+        with os.fdopen(fd, "w", newline="\n") as f:
+            f.write(script)
+        return subprocess.run(
+            [BASH, path], env=env, capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    finally:
+        os.unlink(path)
 
 
 def _dump_dir(d: Path) -> str:
@@ -258,14 +439,26 @@ class TestAgedAutonomousLogsAreReclaimed:
             "12:00:00 [session-end] flush started\n"
             "12:00:01 save-session.sh output from a run long finished\n"
         )
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- the fast path's own cutoff now requires a
+        # FULL N+1 days (matching the fallback's floored-days comparison),
+        # so an exactly-8-day-old file (N+1 with the default N=7) sits
+        # right ON that boundary: its real mtime carries sub-second
+        # precision (a real filesystem write, or `os.utime` here), while
+        # the fast path's reference file can only represent whole seconds
+        # (`touch -d`/`touch -t`), so whether this exact instant lands on
+        # one side of that boundary or the other is a coin flip on
+        # whichever side of a wall-clock second the test happened to land.
+        # 9 days restores the comfortable margin this test always meant to
+        # have (same margin #487 originally measured with 8 days against
+        # the old cutoff).
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert not stale.exists(), (
-            "a non-empty session-end log, 8 days old, survived an ordinary "
+            "a non-empty session-end log, 9 days old, survived an ordinary "
             "flush's own housekeeping -- #487's retention gap: emptiness "
             "was the only thing ever reclaimed here, and this file was "
             "never empty\n" + _dump_dir(autonomous)
@@ -312,17 +505,22 @@ class TestAgedAutonomousLogsAreReclaimed:
         cfg_layer.write_text(_json.dumps(cfg))
         autonomous = project / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True, exist_ok=True)
-        two_days_old = autonomous / "session-end-000000-33333.log"
-        two_days_old.write_text("12:00:00 [session-end] flush started\n")
-        two_days_ago = time.time() - (2 * 24 * 3600)
-        os.utime(two_days_old, (two_days_ago, two_days_ago))
+        # #933: 3 days, not 2 -- with retention=1, the fast path's cutoff
+        # is now exactly 2 days (N+1, N=1); a 2-day-old file sits right on
+        # that boundary (the same sub-second race documented above), so
+        # bump to 3 days for the same comfortable margin this test always
+        # meant to exercise.
+        three_days_old = autonomous / "session-end-000000-33333.log"
+        three_days_old.write_text("12:00:00 [session-end] flush started\n")
+        three_days_ago = time.time() - (3 * 24 * 3600)
+        os.utime(three_days_old, (three_days_ago, three_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
-        assert not two_days_old.exists(), (
+        assert not three_days_old.exists(), (
             "thresholds.autonomous_log_retention_days=1 did not shrink the "
-            "retention window -- a 2-day-old log survived a sweep "
+            "retention window -- a 3-day-old log survived a sweep "
             "configured to reclaim anything over 1 day old\n"
             + _dump_dir(autonomous)
         )
@@ -353,14 +551,19 @@ class TestHousekeepingRunsIndependentlyOfNdcCompression:
             "12:00:00 [session-end] flush started\n"
             "12:00:01 save-session.sh output from a run long finished\n"
         )
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- see the identical comment in
+        # test_must_fire_an_old_nonempty_session_end_log_is_swept above;
+        # the fast path's cutoff now sits at exactly 8 days (N+1, N=7),
+        # so this fixture needs the same margin bump to stay clear of
+        # that boundary's own sub-second race.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert not stale.exists(), (
-            "a non-empty session-end log, 8 days old, survived an ordinary "
+            "a non-empty session-end log, 9 days old, survived an ordinary "
             "flush's own housekeeping with features.ndc_compression=false -- "
             "#498's coupling: the sweep lived inside the RUN_NDC block and "
             "turning NDC compression off silently turned housekeeping off "
@@ -558,10 +761,7 @@ _run_housekeeping_block() {{
 }}
 _run_housekeeping_block
 """
-        result = subprocess.run(
-            [BASH, "-c", script], env=dict(os.environ), capture_output=True, text=True,
-            timeout=30, check=False,
-        )
+        result = _run_bash_script(script, dict(os.environ))
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run "
             f"(REMEMBER_DIR={remember_dir!r}, OSTYPE={ostype!r})\n"
@@ -578,8 +778,11 @@ _run_housekeeping_block
         autonomous.mkdir(parents=True)
         stale = autonomous / "session-end-000000-11111.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- same margin bump as the full-hook tests
+        # above, same reason: 8 days is now exactly the fast path's own
+        # cutoff (N+1, N=7), a sub-second race rather than a safe margin.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         windows_style = str(tmp_path / ".remember").replace("/", "\\")
         self._run_extracted_block(autonomous, windows_style, ostype="msys")
@@ -673,8 +876,10 @@ _run_housekeeping_block
         autonomous.mkdir(parents=True)
         stale = autonomous / "session-end-000000-22222.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- same margin bump, same reason as the
+        # other fast-path fixtures in this file.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         self._run_extracted_block(autonomous, str(tmp_path / ".remember"))
 
@@ -682,4 +887,452 @@ _run_housekeeping_block
             "an ordinary forward-slash REMEMBER_DIR must still be swept "
             "after the fix -- the normalization must be a no-op here, not "
             "a regression\n" + _dump_dir(autonomous)
+        )
+
+
+class TestHousekeepingSweepIsForkFree:
+    """#914: the age-keyed sweep forked a `stat` subshell AND a
+    `_remember_date` (date) subshell for EVERY surviving file, on every
+    flush that reached this point -- on Windows Git Bash, where a single
+    fork costs 50-300ms+ (#511's own measurement), a directory of ~1,200
+    files turned one sweep into ~4,000 process starts and ~140s of wall
+    time, recurring about every 15 minutes in the reporter's own session.
+
+    The fix reads the clock once, before the loop, and builds a single
+    reference file whose mtime is the retention cutoff; `[ "$f" -ot
+    "$ref" ]` is a bash builtin and forks nothing. This asserts the
+    actual claim #914 measured -- PROCESS STARTS -- not just that the
+    sweep still reclaims/retains correctly: a behavior-only test would
+    pass unchanged whether the loop forks once per sweep or twice per
+    file, and #914 is entirely about which of those two it does.
+    """
+
+    def _run_extracted_block_counting_forks(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days: int = 7, bin_dir: Path, counter: Path,
+    ):
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- see that
+        # helper's own docstring for why an env-level prepend cannot be
+        # trusted to survive MSYS's win32->posix conversion on Windows.
+        script = f"""
+set -u
+export PATH="{_bash_path_prepend([bin_dir])}:$PATH"
+config() {{ printf '%s\n' '{retention_days}'; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        env["REMEMBER_FORK_COUNTER"] = str(counter)
+        result = _run_bash_script(script, env)
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+    def test_must_fire_stat_and_date_fork_count_does_not_scale_with_file_count(self, tmp_path):
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        # #933: 9 days, not 8 -- same margin bump, same reason as the
+        # other fast-path fixtures in this file (8 days is now exactly
+        # the fast path's own N+1 cutoff with the default N=7).
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        stale_files = []
+        for i in range(8):
+            stale = autonomous / f"session-end-00000{i}-99999.log"
+            stale.write_text("12:00:00 [session-end] flush started\n")
+            os.utime(stale, (nine_days_ago, nine_days_ago))
+            stale_files.append(stale)
+        # Positive control in the SAME run: one fresh file must survive,
+        # exactly as test_must_fire_a_fresh_nonempty_log_survives_the_same_sweep
+        # pins for the end-to-end path -- without this, a sweep that just
+        # deleted the whole directory would also report a fork count of 0.
+        fresh = autonomous / "session-end-000009-99999.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+
+        bin_dir = tmp_path / "fork-counter-bin"
+        bin_dir.mkdir()
+        counter = tmp_path / "fork-count.txt"
+        counter.write_text("")
+        real_stat = shutil.which("stat")
+        real_date = shutil.which("date")
+        assert real_stat and real_date, "test environment needs real stat/date on PATH"
+        for name, real in (("stat", real_stat), ("date", real_date)):
+            wrapper = bin_dir / name
+            _write_shell_script(
+                wrapper,
+                "#!/bin/sh\n"
+                f'echo {name} >> "$REMEMBER_FORK_COUNTER"\n'
+                f'exec {shlex.quote(real)} "$@"\n',
+            )
+            wrapper.chmod(0o755)
+
+        self._run_extracted_block_counting_forks(
+            autonomous, str(tmp_path / ".remember"), bin_dir=bin_dir, counter=counter,
+        )
+
+        for stale in stale_files:
+            assert not stale.exists(), (
+                f"{stale.name} (9 days old) survived the sweep\n" + _dump_dir(autonomous)
+            )
+        assert fresh.exists(), (
+            "the fresh (just-written) log was reclaimed by the sweep -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+        fork_count = len([l for l in counter.read_text().splitlines() if l])
+        # Before the fix: 9 files x (1 stat + 1 date) = 18 forks, growing
+        # linearly with file count. After the fix: one `date` read before
+        # the loop, independent of file count. A ceiling well under the
+        # file count (9) still clearly distinguishes O(1) from O(n)
+        # without pinning an exact count that would break on the next
+        # portable tweak to the fast path.
+        assert fork_count < 9, (
+            f"stat/date were invoked {fork_count} times reclaiming 8 of 9 "
+            f"files -- the sweep is still forking per file instead of "
+            f"reading the clock once and comparing with a builtin "
+            f"(#914)\ncounter contents: {counter.read_text()!r}"
+        )
+
+
+class TestHousekeepingSweepFallbackAndEdgeCases:
+    """#914 self-review (Explore round 1): two things the fast-path tests
+    above cannot exercise because they only ever run on a machine where
+    the fast path succeeds.
+    """
+
+    def _run_extracted_block_with_path_override(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days, extra_path_dir: Path | None = None,
+    ):
+        """Same shape as TestHousekeepingGlobIsPortableAcrossSeparators's
+        own `_run_extracted_block`, but with the retention-days value
+        passed through as given (no implicit str()/int() coercion that
+        would hide a config value shaped like "08") and an optional
+        directory prepended to PATH, ahead of the real `mktemp`/`touch` --
+        used below to force the fast path's own reference-file build to
+        fail without touching the block itself.
+        """
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: a test naming itself as exercising the fast path (or its
+        # fallback) asserted only the SWEEP'S OUTCOME, never whether
+        # `_remember_auto_ref` was actually built by `mktemp` on the
+        # runner it executes on. Two dead ends on the way to this fix,
+        # kept here so neither gets tried again:
+        #   1. A marker read AFTER the block runs cannot tell the two
+        #      paths apart -- the block's own last line (`unset
+        #      _remember_auto_ref ...`, scripts/save-session.sh, carried
+        #      verbatim into this extraction) clears the variable
+        #      unconditionally on EVERY run, before any code placed
+        #      after `{block}` can ever see it.
+        #   2. A shim that writes its marker to ITS OWN stderr is also
+        #      invisible: the block's own mktemp call is written as
+        #      `$(mktemp ... 2>/dev/null)` -- that redirect is the
+        #      PRODUCTION code's own suppression of mktemp's real error
+        #      output, and it swallows a stderr-based marker exactly as
+        #      thoroughly as a real error message (confirmed by a real
+        #      reproduction: `type mktemp` resolved to this very shim,
+        #      yet nothing it wrote to stderr ever appeared).
+        # A marker file the shim appends to, named by an env var neither
+        # the block nor its `2>/dev/null` ever touches, survives both.
+        real_mktemp = shutil.which("mktemp")
+        assert real_mktemp, "no mktemp on PATH -- fixture assumption broken"
+        marker_bin = Path(tempfile.mkdtemp(prefix="remember-mktemp-marker-"))
+        marker_log = marker_bin / "invocations.log"
+        marker_shim = marker_bin / "mktemp"
+        # CI (windows-latest, job 112746585138/...152, PR #960): both paths
+        # embedded into the shim's own bash content below arrive from
+        # Python as Windows-native, backslash-separated strings on that
+        # platform. `>> "$MKTEMP_SHIM_LOG"` (an append REDIRECT, not a
+        # glob) silently failed to open that target under git-bash there
+        # -- the shim's very first statement -- so EVERY run on that leg
+        # read back an empty log regardless of which path the extracted
+        # block actually took, exactly as #448/#263's own backslash-vs-
+        # forward-slash split already caught for REMEMBER_DIR in this
+        # same file (that fix forward-slashes only when gated on $OSTYPE;
+        # this one is unconditional, since a forward-slash absolute path
+        # is accepted by git-bash on every platform this runs on, POSIX
+        # included, where it is simply a no-op). `.exists()`/`.read_text()`
+        # below still use the ORIGINAL, OS-native `marker_log` Path --
+        # Windows' own file APIs accept '/' as a separator too, so Python
+        # and the shim agree on the same file either way.
+        _grc_posix = lambda p: str(p).replace("\\", "/")
+        _write_shell_script(
+            marker_shim,
+            "#!/bin/sh\n"
+            'echo "INVOKED" >> "$MKTEMP_SHIM_LOG"\n'
+            f'"{_grc_posix(real_mktemp)}" "$@"\n'
+            "rc=$?\n"
+            'if [ "$rc" -eq 0 ]; then echo "SUCCEEDED" >> "$MKTEMP_SHIM_LOG"; fi\n'
+            'exit "$rc"\n',
+        )
+        marker_shim.chmod(0o755)
+
+        path_dirs = [marker_bin]
+        if extra_path_dir is not None:
+            # Ahead of the marker shim: a caller forcing the fallback via
+            # its own broken mktemp must still win over this shim, the
+            # same way it already wins over the real binary.
+            path_dirs.insert(0, extra_path_dir)
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- an
+        # env-level prepend of a native, drive-lettered directory is not
+        # trustworthy on Windows: see that helper's own docstring for why
+        # (bash's native colon-splitting of the resulting PATH value
+        # shreds it on the drive letter's own colon, independent of
+        # slash direction, which the two PREVIOUS fix attempts on this
+        # PR -- forward-slashing the shim content, then fixing the
+        # shebang's newline -- could never have touched, since neither
+        # changed how PATH itself was built).
+        script = f"""
+set -u
+export PATH="{_bash_path_prepend(path_dirs)}:$PATH"
+config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+CLEANUP_FILES=()
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        env["MKTEMP_SHIM_LOG"] = _grc_posix(marker_log)
+        result = _run_bash_script(script, env)
+        result.mktemp_shim_log = (
+            marker_log.read_text(encoding="utf-8") if marker_log.exists() else ""
+        )
+        return result
+
+    def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
+        """Self-review finding: the digits-only sanitizer in
+        save-session.sh accepts a config value like "08" unchanged (it
+        rejects non-digit characters, not leading zeros), and bash
+        arithmetic treats an unprefixed leading-zero literal as octal --
+        where 8/9 are not valid octal digits. Without `10#` on
+        `_AUTONOMOUS_LOG_RETENTION_DAYS` too (only the clock read had it),
+        `_remember_auto_cutoff=$(( 10#$_remember_auto_now -
+        _AUTONOMOUS_LOG_RETENTION_DAYS * 86400 ))` aborts with "value too
+        great for base" for this exact, human-plausible config value --
+        permanently defeating the fast path (and spamming stderr on every
+        flush) for anyone who writes "08" rather than "8".
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        # Clearly past an 8-day window (10 days, not exactly 8) -- at the
+        # boundary itself the sweep's own semantics (age STRICTLY greater
+        # than the retention window, matching the pre-existing `-gt`
+        # comparison this fast path replaces) keep the file, so a file
+        # exactly as old as the window would pass vacuously here too.
+        ten_days_ago = time.time() - (10 * 24 * 3600)
+        stale = autonomous / "session-end-000000-11111.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (ten_days_ago, ten_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-22222.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days="08",
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run with "
+            f"retention_days='08'\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "value too great for base" not in result.stderr, (
+            "retention_days='08' crashed the cutoff arithmetic with a "
+            "bash 'value too great for base' error (octal "
+            "misinterpretation of a leading zero) -- #914's own fast "
+            f"path can never engage for this config value\nstderr={result.stderr!r}"
+        )
+        assert not stale.exists(), (
+            "a 10-day-old log survived with retention_days='08' -- the "
+            "sweep must still reclaim past-window files even when the "
+            "fast path's own arithmetic degrades\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed with retention_days='08' -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test names itself as exercising the fast path, "
+            "but the real mktemp binary was never seen to succeed -- the "
+            "fallback ran instead and this test exercised nothing new"
+            f"\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
+
+    def test_must_fire_fallback_loop_still_reclaims_when_reference_file_cannot_be_built(self, tmp_path):
+        """Self-review finding: every test above only ever runs the FAST
+        path (the real `mktemp`/`touch -d` succeed on every CI platform
+        this suite runs on), so nothing exercises the reintroduced
+        per-file stat()+date() fallback loop -- including the rename of
+        its own loop variable (`_remember_auto_now` ->
+        `_remember_auto_file_now`) made in the same diff that added the
+        fast path. A `mktemp` that always fails forces `_remember_auto_ref`
+        to stay empty, the documented trigger for the fallback.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        # #933 CI (windows-latest, all four interpreters, PR #937): this
+        # fixture used to sit at exactly 8 days (N+1, N=7) and relied
+        # entirely on `broken_bin`'s `mktemp` override actually winning
+        # over the real `mktemp` on PATH to force the fallback. On a real
+        # windows-latest runner that assumption did not hold -- the real
+        # `mktemp` apparently still resolved, so this test exercised the
+        # FAST path after all, landing on the exact N+1-day boundary the
+        # two tests below this one exist to pin, and losing the same
+        # whole-second-vs-sub-second race documented there. Bumping to 9
+        # days removes the dependency on which path actually runs: either
+        # one reliably reclaims a file this far past the window, so the
+        # test now proves what its own name claims regardless of whether
+        # the mktemp override takes effect on a given platform.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        stale = autonomous / "session-end-000000-33333.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (nine_days_ago, nine_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-44444.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        broken_bin = tmp_path / "broken-mktemp-bin"
+        broken_bin.mkdir()
+        fake_mktemp = broken_bin / "mktemp"
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
+        fake_mktemp.chmod(0o755)
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+            extra_path_dir=broken_bin,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block failed to run with mktemp "
+            f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert not stale.exists(), (
+            "a 9-day-old log survived the sweep (intended to force the "
+            "FALLBACK loop via a `mktemp` override, though on some "
+            "platforms the fast path may run instead -- either one must "
+            "reclaim a file this far past the window) -- the per-file "
+            "stat()+date() comparison this diff kept as a fallback, or "
+            "the fast path itself, is broken\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed by the fallback loop -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
+
+    def test_must_not_fire_fast_path_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
+        """#933: the fast path's own cutoff (`now - N*86400`, then `-ot`)
+        deletes anything strictly older than exactly N days -- a REAL-valued
+        boundary. The fallback loop floors `(now - mtime) / 86400` before its
+        `-gt N` check, so it only deletes once a file is a FULL N+1 days old.
+        A log aged 7.5 days with N=7 sits in the gap between those two
+        thresholds: the fast path (pre-fix) reclaims it, the fallback does
+        not -- so whether a 7.5-day-old log survives a flush depends on
+        which path happened to run, which is itself platform-dependent
+        (mktemp/touch -d success). Paired with an 8.5-day-old log (clearly
+        past BOTH thresholds) as the "must fire" positive control in the
+        same fixture, per this repo's own testing rule: an assertion that
+        checks only "the boundary file survived" would also pass if the
+        sweep reclaimed nothing at all.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        seven_and_a_half_days_ago = time.time() - (7 * 24 * 3600 + 12 * 3600)
+        boundary = autonomous / "session-end-000000-55555.log"
+        boundary.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(boundary, (seven_and_a_half_days_ago, seven_and_a_half_days_ago))
+        eight_and_a_half_days_ago = time.time() - (8 * 24 * 3600 + 12 * 3600)
+        past_both = autonomous / "session-end-000000-66666.log"
+        past_both.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(past_both, (eight_and_a_half_days_ago, eight_and_a_half_days_ago))
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert boundary.exists(), (
+            "a log aged 7.5 days (N=7) was reclaimed by the FAST path -- "
+            "the fallback loop's own floored-days comparison would have "
+            "kept this same file (floor(7.5) == 7, not > 7), so which path "
+            "ran determines whether this file survives a flush\n"
+            + _dump_dir(autonomous)
+        )
+        assert not past_both.exists(), (
+            "an 8.5-day-old log (past both the fast path's and the "
+            "fallback's own thresholds) survived the fast path -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test's own name and docstring claim it exercises "
+            "the FAST path at the N/N+1 boundary, but the real mktemp "
+            "binary was never seen to succeed -- the fallback silently "
+            "ran instead, making this test a duplicate of its fallback "
+            "sibling rather than a check on the fast path's own boundary "
+            f"arithmetic\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
+
+    def test_must_not_fire_fallback_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
+        """#933: same fixture as the fast-path boundary test above, run
+        through the FALLBACK loop instead (mktemp forced to fail), to
+        confirm the two paths now agree at the N/N+1 boundary instead of
+        disagreeing depending on which one happened to run.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        seven_and_a_half_days_ago = time.time() - (7 * 24 * 3600 + 12 * 3600)
+        boundary = autonomous / "session-end-000000-77777.log"
+        boundary.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(boundary, (seven_and_a_half_days_ago, seven_and_a_half_days_ago))
+        eight_and_a_half_days_ago = time.time() - (8 * 24 * 3600 + 12 * 3600)
+        past_both = autonomous / "session-end-000000-88888.log"
+        past_both.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(past_both, (eight_and_a_half_days_ago, eight_and_a_half_days_ago))
+
+        broken_bin = tmp_path / "broken-mktemp-bin-933"
+        broken_bin.mkdir()
+        fake_mktemp = broken_bin / "mktemp"
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
+        fake_mktemp.chmod(0o755)
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+            extra_path_dir=broken_bin,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block failed to run with mktemp "
+            f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert boundary.exists(), (
+            "a log aged 7.5 days (N=7) was reclaimed by the FALLBACK "
+            "loop -- floor(7.5) == 7, not > 7, so this file must survive\n"
+            + _dump_dir(autonomous)
+        )
+        assert not past_both.exists(), (
+            "an 8.5-day-old log survived the fallback loop -- positive "
+            "control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
         )

@@ -466,6 +466,99 @@ class TestADivergedStoreIsRefused:
         )
 
 
+# ── #935: the DIVERGED notice must not misreport when reconcile is on ───────
+
+
+class TestTheDivergedNoticeRespectsTheKillSwitch:
+    """#976: #969 hard-disabled 60-git-reconcile.sh, so the #935 promise this
+    notice makes when git_reconcile.enabled=true -- '60-git-reconcile.sh may
+    rebase and push this automatically' -- is false while the kill switch is
+    in place: that hook now reads the flag first (#979), then still
+    unconditionally exits without acting on it. A diverged store waiting on
+    a resolution that will never come is worse than #935's original bug,
+    which only forgot to mention reconcile."""
+
+    def _config_reconcile(self, tmp_path: Path) -> Path:
+        cfg = tmp_path / "remember-config.json"
+        cfg.write_text(
+            json.dumps({
+                "git_restore": {"enabled": True},
+                "git_reconcile": {"enabled": True},
+            }),
+            encoding="utf-8",
+        )
+        return cfg
+
+    def _diverged_with_reconcile(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _diverge_local(remember)
+        _fetch_now(remember)
+        self.env = _flock_env(tmp_path)
+        return home, remember, remote, slug_dir, project
+
+    def test_the_log_stops_promising_automatic_resolution_while_969_holds(self, tmp_path):
+        home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
+
+        _run(slug_dir, project, home, self._config_reconcile(tmp_path), **self.env)
+
+        log = _log_text(slug_dir)
+        assert "DIVERGED" in log, "--- log ---\n" + log
+        assert "may rebase and push this automatically" not in log, (
+            "the DIVERGED log still promises 60-git-reconcile.sh will act "
+            "automatically, but #969 hard-disabled that hook -- it reads the "
+            "flag (#979) but still unconditionally exits without acting on "
+            "it\n--- log ---\n" + log
+        )
+        assert "git_reconcile" in log, (
+            "the log drops all mention of reconcile instead of explaining "
+            "why it is currently inert\n--- log ---\n" + log
+        )
+        assert "969" in log, (
+            "the log does not point at the tracking issue for why reconcile "
+            "will not act\n--- log ---\n" + log
+        )
+        assert "Resolve it by hand" in log, (
+            "the log must say to resolve it by hand -- reconcile will not, "
+            "while #969's kill switch holds\n--- log ---\n" + log
+        )
+
+    def test_the_notice_also_stops_promising_automatic_resolution(self, tmp_path):
+        home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
+        cfg = self._config_reconcile(tmp_path)
+
+        for _ in range(3):
+            _run(slug_dir, project, home, cfg, **self.env)
+
+        notice = slug_dir / "tmp" / NOTICE_NAME
+        assert notice.exists(), "the persistent divergence never reached the human notice"
+        body = notice.read_text(encoding="utf-8")
+        assert "may rebase and push this automatically" not in body, (
+            "the human-facing notice still makes the false promise while "
+            "#969's kill switch is in place\n--- notice ---\n" + body
+        )
+        assert "git_reconcile" in body, (
+            "the notice drops all mention of reconcile\n--- notice ---\n" + body
+        )
+        assert "969" in body, (
+            "the notice does not point at the tracking issue\n--- notice ---\n" + body
+        )
+
+    def test_disabled_reconcile_keeps_the_original_wording(self, tmp_path):
+        """Positive control: with git_reconcile left at its default (off), the
+        original promise must still be made -- this is what the whole class
+        above would also pass against if the hook did nothing at all."""
+        home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
+
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
+
+        log = _log_text(slug_dir)
+        assert "merge or rebase" in log, "--- log ---\n" + log
+        assert "git_reconcile" not in log, (
+            "a disabled reconcile still mentioned it in the log\n--- log ---\n" + log
+        )
+
+
 # ── Three states, not two ────────────────────────────────────────────────────
 
 

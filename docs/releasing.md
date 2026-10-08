@@ -28,6 +28,15 @@ otherwise land `0.36.2` on top of it, and every install pinned to `release` woul
 drop. If you really do need to publish an older line on purpose, re-run the workflow via
 `workflow_dispatch` with the `allow_version_regression` input set.
 
+**This guard only exists in the workflow file as it is at the tag's own commit** -- an ordinary
+`push: tags:` run executes `release-branch.yml` as it exists *at the tagged commit*, not the copy
+on `main` ([#892](https://github.com/Digital-Process-Tools/claude-remember/issues/892)). #856
+first shipped in v0.39.0, so pushing a tag directly for any release line before v0.39.0 runs that
+line's own pre-#856 copy of the workflow, which has no `check_version_order.py` step at all --
+the refusal above never runs, and a version drop the next install notices is the only sign
+anything happened. Publish any pre-v0.39.0 line through `workflow_dispatch` from `main` instead
+of pushing its tag directly, until no reachable release line predates the guard.
+
 ## The sequence
 
 1. **Fold `changelog.d/` into a `## [x.y.z]` section of CHANGELOG.md and bump every version
@@ -41,7 +50,20 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    all made that way, and `.oss.json` leaves `merge_method` unset (`null`).
    *Why:* that commit is what gets tagged; CI across three OSes is the gate.
 
-3. **Tag that commit `vx.y.z` and push the tag with your own credentials**:
+3. **Run the local pre-tag check before cutting the tag** (#893): `check_release_tree.py` runs
+   against every pull request already (see "This already gates every pull request" below), so the
+   plugin folder is clean on `main` well before a release -- but a hold-class finding found by the
+   portal and not by this script is only ever caught by the real scan, and that scan can only be
+   run against a pushed branch. So before tagging, do the full "Preview before you tag" sequence
+   below -- build the tree from the commit you are about to tag, run `check_release_tree.py` and
+   `smoke_release_tree.py` on it, push it to `release-preview`, and validate it through the portal's
+   own submit form. Only once that is clean (or its findings are understood and accepted) move on
+   to step 4.
+   *Why before the tag, not after:* the portal can raise the same hold again on each new version
+   (Anthropic's own pre-submission checklist). A hold-class finding caught after the tag is pushed
+   is a version already in front of a reviewer; this step is what catches it first.
+
+4. **Tag that commit `vx.y.z` and push the tag with your own credentials**:
    `git tag vx.y.z <release-commit-sha> && git push origin vx.y.z`, then check it landed with
    `git ls-remote --tags origin vx.y.z`.
    *Why:* **pushing the tag is what publishes to the directory now.** The tag push starts the
@@ -51,7 +73,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    workflows (GitHub suppresses them to prevent loops). The oss release flow pushes the tag with
    `git push origin <tag>` from the maintainer's checkout, which does start it.
 
-4. **Watch the `release branch` run** (Actions tab, or `gh run list --workflow release-branch.yml`).
+5. **Watch the `release branch` run** (Actions tab, or `gh run list --workflow release-branch.yml`).
    It has two jobs:
    - `verify`, read-only: installs PyYAML, builds the tree from the tag, runs
      [`check_release_tree.py`](../.github/scripts/check_release_tree.py) (the directory's
@@ -72,7 +94,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    *Why two jobs:* the smoke test runs the plugin's own hooks, so it never holds a token that can
    push.
 
-5. **Publish the GitHub release** (`scripts/release_publish.py` from the oss plugin, not a file in
+6. **Publish the GitHub release** (`scripts/release_publish.py` from the oss plugin, not a file in
    this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
@@ -80,7 +102,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    are required by the directory. Keep `--verify-tag`: without it `gh release create` would create
    a missing tag itself, through the API.
 
-6. **The directory picks up the new `release` commit** (at once through the push webhook,
+7. **The directory picks up the new `release` commit** (at once through the push webhook,
    otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
    the version was in the **Versions** tab 3 to 4 minutes after the push. A version with a
    **Policy hold** waits for an Anthropic reviewer. And while the listing itself is flagged ("A
@@ -109,7 +131,7 @@ would need `export-ignore`). Then:
 - **CHANGELOG.md is not shipped at all** (on the deny-list, #898): only README and LICENSE are
   required by the directory, and a changelog line pairs an env-read token with a link far too
   easily for what it is worth. Release notes still come from `main`'s own CHANGELOG.md -- see
-  step 5 below.
+  step 6 below.
 - **It rewrites links** in every shipped `.md` file that point at a removed path (the README's
   `docs/` links and its logo) to absolute URLs on `main`: `raw.githubusercontent.com` for images,
   `github.com/.../blob/main` for everything else. Links to files that still ship are left alone.
@@ -348,6 +370,34 @@ it. Move work the hook does not need at that event out of its source chain, or d
 tree-shaker cannot prove unreachable. `python3 .github/scripts/compile_hooks.py --repo .` prints
 each hook's compiled size without writing anything.
 
+**This already gates every pull request, not only a release (#904).**
+`tests/test_strip_shell_comments_900.py::test_this_repository_built_tree_has_no_check_failures`
+builds the full release tree and asserts `check_release_tree.py` reports zero offenders --
+`_check_hook_script_size` included -- and that test is collected by the ordinary `pytest` job
+(`.github/workflows/tests.yml`), which runs on every pull request across the whole OS x Python
+matrix, not only the separate `hook-tests-compiled` job that recompiles hooks in place. A hook (or
+a library it compiles in) that crosses the 120 KiB budget already fails CI before merge; nothing
+further was added for this.
+
+A `.claude/jit-context` entry (`paths/00-manual/hook-script-size-budget.md`) also fires on any
+edit under `scripts/*.sh`, stating the 128 KiB scanner limit, the 120 KiB release budget, and the
+scanner's other known triggers below.
+
+### A one-line delegate splicing a positional parameter into a string (#905)
+
+claude-directory-publishing triggers.md 14: #899 folded `scripts/log.sh`'s three dispatch
+reporters into one-liners, e.g. `report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"`,
+and the portal held exactly the three hooks that compile that dispatch in, as
+`COMMAND_SCRIPT_NOT_FOLLOWED`. It cleared only once each reporter went back to a self-contained
+body -- its own locals, its own `#618` flatten, its own writes (r40).
+
+`check_release_tree.py`'s `_check_single_line_delegate_positional` now FAILs any shipped shell
+function whose whole body is a single call to another function with a positional parameter
+(`$1`..`$9`, `${1}`..) spliced into a string argument, anywhere in a shipped `.sh` -- not only the
+three named reporters `tests/test_dispatch_reporter_shape_898.py` already pins. A bare `"$1"` (a
+named-local-style passthrough) is fine; `"$1"` embedded in a longer message string is the held
+shape.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
@@ -530,8 +580,10 @@ commit built from tag v0.38.0 (`4cda472` on `main`), the first release carrying 
 
 The rest of the v0.38.0 run, as the portal showed it: Received "Arrived by a push to the tracked
 branch"; Fetch "Fetched and unpacked: 73 files, 1.3 MB"; Validation "Passed with warnings"; Review
-"No reviewer action recorded for this version". It did not go live: the plugin-level hold
-described under "Reading a scan" above still applies.
+"No reviewer action recorded for this version". It did not go live at the time: the plugin-level
+hold described under "Reading a scan" above still applied. **It later cleared on its own, with no
+reply ever received** -- see "Contacting Anthropic about a plugin" below for the 2026-10-06
+update, before assuming a wait described here is still open.
 
 On the earlier v0.36.0 (`a92a072`, full tree, 474 files / 9.2 MB) the validator never finished:
 `VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds; the portal's wording
@@ -952,7 +1004,10 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Anthropic reviewer" (Approved). Shipping one now would only clear the `ICON_MISSING` warning;
   it would not change the listing icon. **The lesson for a new plugin: ship the icon before the
   first portal submission** (see #865). For another repository: put the icon in the plugin
-  folder **before** the first save or submit.
+  folder **before** the first save or submit. **Shipped, 2026-10-06 (#865):** remember now ships
+  `.claude-plugin/icon.png` (a square 512x512 PNG), referenced from `plugin.json`'s `icon` field,
+  purely to clear the `ICON_MISSING` warning -- per the "set only once" rule above this does not
+  change the live listing icon.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
 ### For another plugin repository, in addition to the reuse steps below
@@ -964,9 +1019,11 @@ was "Validation ran out of time". That is the failure the `release` branch exist
    a wildcard after a shell, interpreter, package manager or runner, or `curl` is a hold. A
    specific command (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}` script is not.
    `check_release_tree.py` checks a space-delimited `allowed-tools` string the same as a
-   comma-delimited one (#866, trap.d/859); a `..`-escaped path past `${CLAUDE_PLUGIN_ROOT}` or a
-   wrapper command (`env bash ...`, `sudo curl ...`) in front of an otherwise-scoped entry is
-   **not yet** covered -- read it by hand until that lands.
+   comma-delimited one (#866, trap.d/859), and a `..`-escaped path past `${CLAUDE_PLUGIN_ROOT}`
+   is refused too, both forward-slash and backslash-separated (#879, #950); a wrapper command
+   (`env bash ...`, `sudo curl ...`, `command curl ...`, `nice ...`, `stdbuf ...`) in front of an
+   otherwise-scoped entry is covered too -- still read it by hand for anything outside
+   `_UNSCOPED_COMMANDS`.
 3. Make sure fake credentials live only in denied paths (`tests/`).
 4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
@@ -974,11 +1031,15 @@ was "Validation ran out of time". That is the failure the `release` branch exist
 6. If the plugin itself was ever flagged, a clean, **Approved** version still needs the directory
    team: it waits for them however clean it is (observed on v0.38.0, see "Reading a scan").
    Contact them as soon as the first clean version is Approved, with the before and after
-   numbers (ours: policy holds 1 to 0, security scan passed, status Approved).
+   numbers (ours: policy holds 1 to 0, security scan passed, status Approved). **That flag can
+   also clear on its own, with no reply ever received** -- read "Contacting Anthropic about a
+   plugin" below before assuming a wait is still open; check the portal's own **version list**
+   for your latest Approved versions' publish state rather than relying only on the flag's
+   last-known reading.
 
 ## Listing details: what comes from where
 
-Sourced on 2026-10-02.
+Sourced on 2026-10-02, except "Contacting Anthropic about a plugin" below, updated 2026-10-06.
 
 - **The listing fields in `plugin.json`.** Per the code.claude.com plugin manifest reference, the
   directory reads `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl` and
@@ -1013,7 +1074,31 @@ portal's **Contact Anthropic** opens a mail to `directory@anthropic.com` with th
 submission".
 
 For remember, the maintainer sent that mail on 2026-10-02, after the v0.38.0 scan, asking the
-directory team to clear the plugin-level hold. No reply had arrived as of writing.
+directory team to clear the plugin-level hold described under "Reading a scan" above. The portal's
+own help desk replied within a minute with an automatic acknowledgement (ticket #140917199,
+"Submitted — We'll pick up your ticket soon"); that is the route, not an answer, and no further
+reply to that ticket arrived.
+
+**Update (2026-10-06, #863): the plugin-level "Needs the directory team" hold cleared on its own,
+and a second, unrelated confusion followed it.** By 2026-10-05 v0.40.0 validated with zero holds
+(#899, #901 fixed the code-side `COMMAND_SCRIPT_NOT_FOLLOWED` cause), but the plugin-level flag
+itself was still reported as open, separate from anything a code change could clear -- consistent
+with "Reading a scan" above. On 2026-10-06 a re-validation of the *same, unchanged* commit showed a
+new `COMMAND_SCRIPT_NOT_FOLLOWED` hold on all four hooks, which read at first as the flag
+resurfacing. **It was not:** that reading came from the validator behind the *new-submission*
+form, not from the review that gates publishing a new version of a plugin already listed. Checking
+the portal's **version list** directly instead showed v0.38.0 through v0.41.0 all **Approved**,
+each with "Publish update" available and nothing held. So, as of 2026-10-06, nothing blocks
+publishing an approved version; the remaining step is a manual **Publish** click in the portal, not
+a code change -- **this is a change since the mail above, not a correction of it: the hold it
+asked about was real when it was sent.**
+
+**Still open, on ticket #140917199: Keywords and Short description show "No value"** (see
+"Listing details: what comes from where" above) -- that question is still with the directory team
+and no reply has been recorded. `#841` (the official-marketplace pin lagging this repo's releases)
+is tracked on its own issue, with a cause identified and a bump request filed upstream, but it
+remains open there, waiting on that external pin to move; it isn't something this repository's
+tooling or this ticket can move.
 
 ## Reusing this in another plugin repository
 
@@ -1029,6 +1114,10 @@ everything repository-specific lives in `.github/release-branch.json`:
   environment, and the binaries it fakes all come from `.github/release-branch.json`'s `smoke`
   block (`bin_env_vars`, `drop_env_prefixes`, `fake_bins`) -- edit that block, not the script
   (#866). `hook-errors.log` is still read by name, not from config.
+- A missing `hooks/hooks.json`, or one that declares zero `command` hooks, is a **hard failure**
+  in both `check_release_tree.py` and `smoke_release_tree.py` (#858), with no config flag to opt
+  out. A plugin with no hooks of its own cannot reuse this tooling as it stands -- add at least
+  one `command` hook (even a no-op) before adopting it, or expect both checks to fail.
 - `release-branch.yml` reads the pinned `claude` CLI version from `.github/release-branch.json`'s
   `cli_version`, not from a workflow env entry -- edit that, and keep it at 2.1.281 or later (the
   floor is documented next to it in `_cli_version_why`) (#866).
@@ -1037,7 +1126,10 @@ everything repository-specific lives in `.github/release-branch.json`:
 
 To adopt it:
 
-1. Copy `.github/scripts/{build,check,smoke}_release_tree.py`, `.github/release-branch.json` and
+1. Copy `.github/scripts/{build,check,smoke}_release_tree.py` and
+   `.github/scripts/check_version_order.py` (`release-branch.yml`'s `publish` job calls it on
+   every release after the first one with a `release` parent (#856); skip it and that job fails
+   with "file not found" the first time that applies to you), `.github/release-branch.json` and
    `.github/workflows/release-branch.yml`, and adapt the points above.
 2. Rewrite the deny-list from that repository's own tree. Check every candidate against what the
    plugin loads at runtime (hooks, scripts they call, skills, commands, manifests) before denying

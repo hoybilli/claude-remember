@@ -220,6 +220,90 @@ class TestARejectionIsNotADeferral:
             )
 
 
+# ── #935: the REJECTED notice must not misreport when reconcile is on ───────
+
+
+class TestTheRejectionNoticeRespectsTheKillSwitch:
+    """#976: #969 hard-disabled 60-git-reconcile.sh, so the #935 promise this
+    notice makes when git_reconcile.enabled=true -- 'the next after_save run
+    (60-git-reconcile.sh) may fetch, rebase and push this automatically' -- is
+    false while the kill switch is in place: that hook now reads the flag
+    first (#979), then still unconditionally exits without acting on it. A
+    rejected push waiting on a resolution that will never come is worse than
+    #935's original bug, which only forgot to mention reconcile."""
+
+    def _config_reconcile(self, tmp_path: Path) -> Path:
+        cfg = tmp_path / "remember-config.json"
+        cfg.write_text(
+            json.dumps({
+                "cooldowns": {"git_backup_seconds": 0},
+                "git_reconcile": {"enabled": True},
+            }),
+            encoding="utf-8",
+        )
+        return cfg
+
+    def test_the_log_stops_promising_automatic_resolution_while_969_holds(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = self._config_reconcile(tmp_path)
+
+        _run(slug_dir, project, home, remember, cfg)
+
+        log = _log_text(slug_dir)
+        assert "REJECTED" in log, "--- log ---\n" + log
+        assert "may fetch, rebase and push this automatically" not in log, (
+            "the REJECTED log still promises 60-git-reconcile.sh will act "
+            "automatically, but #969 hard-disabled that hook -- it reads the "
+            "flag (#979) but still unconditionally exits without acting on "
+            "it\n--- log ---\n" + log
+        )
+        assert "git_reconcile" in log, (
+            "the log drops all mention of reconcile instead of explaining "
+            "why it is currently inert\n--- log ---\n" + log
+        )
+        assert "969" in log, (
+            "the log does not point at the tracking issue for why reconcile "
+            "will not act\n--- log ---\n" + log
+        )
+
+    def test_the_notice_also_stops_promising_automatic_resolution(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = self._config_reconcile(tmp_path)
+
+        for n in range(3):
+            _save_again(remember, slug_dir, n)
+            _run(slug_dir, project, home, remember, cfg)
+
+        notice = slug_dir / "tmp" / NOTICE_NAME
+        assert notice.exists(), "the persistent rejection never reached the human notice"
+        body = notice.read_text(encoding="utf-8")
+        assert "may fetch, rebase and push this automatically" not in body, (
+            "the human-facing notice still makes the false promise while "
+            "#969's kill switch is in place\n--- notice ---\n" + body
+        )
+        assert "git_reconcile" in body, (
+            "the notice drops all mention of reconcile\n--- notice ---\n" + body
+        )
+        assert "969" in body, (
+            "the notice does not point at the tracking issue\n--- notice ---\n" + body
+        )
+
+    def test_disabled_reconcile_keeps_the_original_wording(self, tmp_path):
+        """Positive control: with git_reconcile left at its default (off), the
+        original promise must still be made -- otherwise this whole class
+        would also pass against a hook that does nothing at all."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = _config(tmp_path)
+
+        _run(slug_dir, project, home, remember, cfg)
+
+        log = _log_text(slug_dir)
+        assert "fetch, merge or rebase" in log, "--- log ---\n" + log
+        assert "git_reconcile" not in log, (
+            "a disabled reconcile still mentioned it in the log\n--- log ---\n" + log
+        )
+
+
 # ── The opposite failure: a blip must stay quiet ─────────────────────────────
 
 

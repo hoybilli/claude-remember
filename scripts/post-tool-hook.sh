@@ -386,6 +386,16 @@ fi
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 
+# #902: the same check log.sh's own REMEMBER_LOG_DIR guard applies, needed
+# again here because this file's own mkdir below runs on the fast path
+# BEFORE log.sh is ever sourced, so that guard has not run yet. Byte-wise
+# (#695), hence the function + `local LC_ALL=C` rather than an inline `[[ ]]`.
+_remember_dir_is_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+
 # "PostToolUse ran at all" (#200) — written here, before every early exit
 # below, because the question the doctor asks is whether this hook is WIRED,
 # and the answers to that and to "did it find a transcript" are different.
@@ -479,7 +489,90 @@ fi
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
-SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+
+# --- SESSION_DIR: replay the slug, or compute it once per (project, config
+# dir) and remember it (#913) ---
+# claude_projects_dir()/session_dir_slug() are pure functions of PROJECT and
+# CLAUDE_CONFIG_DIR (and HOME/OSTYPE, neither of which moves mid-session), so
+# the pair this invocation would resolve to is identical to the pair any
+# other invocation for the same project resolves to. Both functions still
+# run unconditionally today, on EVERY tool call -- fast path included,
+# because this line sits below the _REMEMBER_FAST if/else, not inside it --
+# and on Windows/Git Bash each one forks `cygpath` (session_dir_slug forks a
+# `sed` too). Measured in #913: ~384 ms of a 986 ms trace on one Windows box.
+#
+# A small sidecar closes that, independent of lib-env-cache.sh: this is a
+# LOCAL cache of a LOCAL computation, not a replay of the shared chain
+# lib-env-cache.sh guards, so it carries its own identity check rather than
+# reusing that file's invalidation (which does not track CLAUDE_CONFIG_DIR
+# at all, and should not be made to for the sake of one caller).
+#
+# Keyed on PROJECT, NOT MEMORY_PROJECT_DIR (#973 fix; #913 self-review had
+# keyed this on MEMORY_PROJECT_DIR instead, reasoning below). SESSION_DIR
+# below is computed from $PROJECT -- "$(claude_projects_dir)/$(session_dir_slug
+# "$PROJECT")" -- so the cache key must track PROJECT's granularity, or the
+# key can validate a cache entry that was never actually keyed on the thing
+# whose value it is.
+#
+# MEMORY_PROJECT_DIR deliberately collapses every linked worktree of one repo
+# to the SAME value (lib-memory-dir.sh, #56), which is also why REMEMBER_DIR
+# -- and therefore this cache FILE's location -- stays shared across
+# worktrees on purpose: that sharing is correct for MEMORY, which is meant to
+# survive `git worktree remove` and be pooled across worktrees. But a cache
+# KEY built from that same collapsed value can never distinguish worktree A's
+# PROJECT from worktree B's: both share one cache file AND, under the old
+# key, one cache key, so whichever worktree wrote last silently wins for
+# every reader regardless of which worktree is asking (#973) -- the file's
+# sharing leaking into the key's sharing, when only the former was intended.
+# PROJECT stays worktree-specific, so it is the only key that actually
+# matches what gets cached, even though the file it is written into keeps
+# living at the shared, MEMORY_PROJECT_DIR-derived location.
+#
+# The #913 cost this cache exists to avoid is unaffected for the common case
+# (repeat calls within ONE worktree, where PROJECT does not change); it is
+# only reintroduced -- correctly -- the moment two worktrees of the same repo
+# interleave calls against this shared file, which #913 itself counted as an
+# edge case rather than the steady state it was optimizing.
+#
+# HOME is also part of the key (second #913 self-review finding): claude_projects_dir()
+# falls back to "$HOME/.claude" whenever CLAUDE_CONFIG_DIR is unset, and this
+# cache outlives one invocation -- a shared-filesystem/CI setup where
+# REMEMBER_DIR is reached under more than one HOME (no CLAUDE_CONFIG_DIR
+# pinned) would otherwise serve one HOME's SESSION_DIR to another's
+# invocations indefinitely, with nothing to trigger a recompute.
+_SESSION_DIR_CACHE="$REMEMBER_DIR/tmp/session-dir-cache"
+_SDC_CACHE_PROJECT="$PROJECT"
+SESSION_DIR=""
+if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
+    && [ -O "$_SESSION_DIR_CACHE" ] && [ -r "$_SESSION_DIR_CACHE" ]; then
+    _SDC_PROJECT="" _SDC_CONFIG_DIR="" _SDC_HOME="" _SDC_DIR=""
+    { IFS= read -r _SDC_PROJECT; IFS= read -r _SDC_CONFIG_DIR; \
+      IFS= read -r _SDC_HOME; IFS= read -r _SDC_DIR; } \
+        < "$_SESSION_DIR_CACHE" 2>/dev/null
+    if [ "$_SDC_PROJECT" = "$_SDC_CACHE_PROJECT" ] \
+        && [ "$_SDC_CONFIG_DIR" = "${CLAUDE_CONFIG_DIR:-}" ] \
+        && [ "$_SDC_HOME" = "${HOME:-}" ] \
+        && [ -n "$_SDC_DIR" ]; then
+        SESSION_DIR="$_SDC_DIR"
+    fi
+fi
+if [ -z "$SESSION_DIR" ]; then
+    SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+    # mktemp + rename (#429's lesson, same shape lib-env-cache.sh already
+    # uses): a reader must never see a half-written cache, and a predictable
+    # path pre-seeded with a symlink must never be the one this writes
+    # through.
+    _SDC_TMP=$(mktemp "${_SESSION_DIR_CACHE}.XXXXXX" 2>/dev/null) && {
+        {
+            printf '%s\n' "$_SDC_CACHE_PROJECT"
+            printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"
+            printf '%s\n' "${HOME:-}"
+            printf '%s\n' "$SESSION_DIR"
+        } > "$_SDC_TMP" 2>/dev/null \
+            && mv -f "$_SDC_TMP" "$_SESSION_DIR_CACHE" 2>/dev/null \
+            || rm -f "$_SDC_TMP" 2>/dev/null
+    }
+fi
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
@@ -951,9 +1044,17 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         fi
     fi
 
+    if [ "$ALREADY_RUNNING" = false ] && _remember_dir_is_unsafe; then
+        log "hook" "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir or save (#902)"
+        ALREADY_RUNNING=true
+    fi
     if [ "$ALREADY_RUNNING" = false ]; then
         mkdir -p "$REMEMBER_DIR/logs/autonomous"
-        _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log"
+        # #902: date + PID, not HHMMSS alone -- a bare HHMMSS collides with a
+        # file from an earlier day still inside the retention window, and a
+        # seed appended to THAT file's stale content is what first surfaced
+        # the missing REMEMBER_DIR guard above.
+        _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%Y%m%d-%H%M%S)-$$.log"
         # Seeded with a header line BEFORE the backgrounded save-session.sh
         # ever opens it, and the nohup redirect below appends (`>>`) rather
         # than truncates (`>`) -- same defence the SessionEnd hook already
