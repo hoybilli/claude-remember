@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "bash": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/copilot-session-start-hook.sh\"",
+        "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" copilot-session-start-hook.sh; exit $LASTEXITCODE"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "bash": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-hook.sh\"",
+        "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" user-prompt-hook.sh; exit $LASTEXITCODE"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "bash": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/copilot-post-tool-hook.sh\"",
+        "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" copilot-post-tool-hook.sh; exit $LASTEXITCODE"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "bash": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/copilot-session-end-hook.sh\"",
+        "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" copilot-session-end-hook.sh; exit $LASTEXITCODE",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

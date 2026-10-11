@@ -40,8 +40,9 @@ of pushing its tag directly, until no reachable release line predates the guard.
 ## The sequence
 
 1. **Fold `changelog.d/` into a `## [x.y.z]` section of CHANGELOG.md and bump every version
-   site**: `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, the README version badge,
-   CHANGELOG.md (the list lives in `.oss.json`, `version_sites`).
+   site**: `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, the Copilot manifest
+   `plugin.json` at the root, the README version badge, CHANGELOG.md (the list lives in
+   `.oss.json`, `version_sites`).
    *Why:* DPT-marketplace installs follow `main`, and the `version` field in `plugin.json` is the
    only thing that tells them there is something new. The tag does not matter to them.
 

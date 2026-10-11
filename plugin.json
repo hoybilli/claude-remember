@@ -1,0 +1,11 @@
+{
+  "name": "remember",
+  "description": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
+  "version": "0.42.2",
+  "author": {
+    "name": "Digital Process Tools"
+  },
+  "license": "Community License",
+  "keywords": ["memory", "context", "persistence", "session"],
+  "hooks": "./hooks/hooks.copilot.json"
+}

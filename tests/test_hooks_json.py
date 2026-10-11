@@ -92,6 +92,14 @@ def test_every_shipped_hook_script_is_wired():
             # test_build_entry_only_names_confirmed_events pin that the
             # installer's generated manifest references every one of them.
             continue
+        if script.name.startswith("copilot-"):
+            # The Copilot hosts' wrappers (issue: vscode) are bound by
+            # hooks/hooks.copilot.json, which only those hosts load (root
+            # plugin.json); hooks/hooks.json stays upstream's. Their own
+            # wiring guard: tests/test_hooks_copilot_json_vscode.py's
+            # test_every_handler_has_bash_and_powershell_and_no_command
+            # and test_named_script_exists.
+            continue
         assert script.name in all_commands, (
             f"scripts/{script.name} ships with the plugin but no hooks.json "
             f"command references it"
@@ -410,13 +418,12 @@ def test_commands_parse_under_powershell():
 # ---------------------------------------------------------------------------
 # Windows PowerShell launcher (issue: vscode)
 #
-# VS Code Agents (Copilot harness) on Windows runs a hook entry's `command`
-# through Windows PowerShell, where a bare `bash` can resolve to the WSL
-# launcher. A sibling `powershell` key on each entry is honoured there and
-# points at scripts/run-hook.ps1, which finds Git Bash explicitly. Claude Code
-# ignores the extra key and keeps using `command`. The functional tests below
-# are OBSERVED on Windows only; that macOS/Linux ignore the `powershell` key is
-# REASONED from the host's documented behaviour, not observed.
+# The Copilot hosts on Windows run a handler's `powershell` key (observed);
+# a bare `bash` there can resolve to the WSL launcher. Each handler in
+# hooks/hooks.copilot.json -- the Copilot-only hooks file, named by the root
+# plugin.json -- points at scripts/run-hook.ps1, which finds Git Bash
+# explicitly. hooks/hooks.json is upstream's, `command` only, for Claude Code.
+# The functional tests below are OBSERVED on Windows only.
 # ---------------------------------------------------------------------------
 
 _HOOK_SCRIPT_NAMES = (
@@ -425,16 +432,22 @@ _HOOK_SCRIPT_NAMES = (
     "post-tool-hook.sh",
     "session-end-hook.sh",
 )
+COPILOT_HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.copilot.json"
+_COPILOT_SCRIPT_NAMES = (
+    "copilot-session-start-hook.sh",
+    "user-prompt-hook.sh",
+    "copilot-post-tool-hook.sh",
+    "copilot-session-end-hook.sh",
+)
 RUN_HOOK_PS1 = SCRIPTS_DIR / "run-hook.ps1"
 
 
 def _iter_entries():
-    """Yield (loc, hook_entry_dict) for every hook entry."""
-    data = json.loads(HOOKS_JSON.read_text())
-    for event, groups in data.get("hooks", {}).items():
-        for gi, group in enumerate(groups):
-            for hi, hook in enumerate(group.get("hooks", [])):
-                yield f"{event}[{gi}].hooks[{hi}]", hook
+    """Yield (loc, handler) for every handler in hooks/hooks.copilot.json."""
+    data = json.loads(COPILOT_HOOKS_JSON.read_text(encoding="utf-8"))
+    for event, handlers in data.get("hooks", {}).items():
+        for hi, handler in enumerate(handlers):
+            yield f"{event}[{hi}]", handler
 
 
 def _script_named_by(command: str) -> str:
@@ -452,57 +465,20 @@ def _script_named_by(command: str) -> str:
 # prompting on stdin. NOT a fix for an unset or stale root: there `-File`
 # fails before any script runs, and Windows PowerShell 5.1 prints its banner
 # to stdout even with -NoLogo (observed) -- see docs/vscode-verification.md.
+# tests/test_hooks_copilot_json_vscode.py pins every handler to this form.
 _PS_VALUE = ('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '
              '"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1" {name}; exit $LASTEXITCODE')
 
 
-def test_every_entry_has_a_powershell_launcher_key():
-    entries = list(_iter_entries())
-    assert len(entries) == len(_HOOK_SCRIPT_NAMES)
-    for loc, hook in entries:
-        name = _script_named_by(hook["command"])
-        expected = _PS_VALUE.format(name=name)
-        assert hook["powershell"] == expected, f"{loc}: wrong powershell launcher"
-    assert RUN_HOOK_PS1.is_file(), "scripts/run-hook.ps1 is missing"
-
-
 def test_command_strings_are_unchanged_for_claude_code():
-    """Positive control: the `command` Claude Code (and VS Code on macOS/Linux)
-    runs is byte-for-byte what it was before the `powershell` key existed."""
-    commands = [hook["command"] for _loc, hook in _iter_entries()]
-    assert commands == [
+    """hooks/hooks.json's `command` strings are upstream's, byte for byte,
+    and it carries no other key a Copilot port once added."""
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    hooks = [h for groups in data["hooks"].values() for g in groups for h in g["hooks"]]
+    assert [h["command"] for h in hooks] == [
         f'bash "${{CLAUDE_PLUGIN_ROOT}}/scripts/{name}"' for name in _HOOK_SCRIPT_NAMES
     ]
-
-
-_PS_EXE = shutil.which("pwsh") or shutil.which("powershell")
-
-
-@pytest.mark.skipif(_PS_EXE is None, reason="no PowerShell on PATH")
-def test_powershell_values_parse_under_powershell():
-    """Each `powershell` value dry-parses (same probe as the `command` check)."""
-    parser_probe = (
-        "$src = [Console]::In.ReadToEnd(); "
-        "$errors = $null; "
-        "$null = [System.Management.Automation.Language.Parser]::ParseInput("
-        "$src, [ref]$null, [ref]$errors); "
-        "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
-    )
-    seen = 0
-    for loc, hook in _iter_entries():
-        seen += 1
-        result = subprocess.run(
-            [_PS_EXE, "-NoProfile", "-NonInteractive", "-Command", parser_probe],
-            input=hook["powershell"] + "\n",
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        assert result.returncode == 0, (
-            f"{loc}: PowerShell ParserError\ncmd: {hook['powershell']}\n"
-            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-        )
-    assert seen == len(_HOOK_SCRIPT_NAMES)
+    assert RUN_HOOK_PS1.is_file(), "scripts/run-hook.ps1 is missing"
 
 
 _WIN_POWERSHELL = shutil.which("powershell.exe") if sys.platform == "win32" else None
@@ -582,7 +558,7 @@ def test_powershell_launcher_reaches_script_with_backslash_plugin_root(tmp_path)
     space, and a non-ASCII UTF-8 payload on stdin. Observed on Windows only."""
     marker = tmp_path / "marker.txt"
     stub = 'echo "$(basename "$0")" >> "$REMEMBER_TEST_MARKER"\ncat\n'
-    root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
+    root = _fake_plugin(tmp_path, {name: stub for name in _COPILOT_SCRIPT_NAMES})
     for loc, hook in _iter_entries():
         result = _run_launcher(
             root, env=_launcher_env(root, {"REMEMBER_TEST_MARKER": str(marker).replace("\\", "/")}),
@@ -590,7 +566,7 @@ def test_powershell_launcher_reaches_script_with_backslash_plugin_root(tmp_path)
         assert result.returncode == 0, f"{loc}: {result.stderr!r}"
         assert "ünï – 日本" in result.stdout.decode("utf-8"), f"{loc}: payload mangled"
     ran = marker.read_text(encoding="utf-8").split()
-    assert sorted(ran) == sorted(_HOOK_SCRIPT_NAMES)
+    assert sorted(ran) == sorted(_COPILOT_SCRIPT_NAMES)
 
 
 @_needs_win_launcher
@@ -616,13 +592,13 @@ def test_manifest_values_run_under_restricted_execution_policy(tmp_path):
     out_dir = tmp_path / "stdin-seen"
     out_dir.mkdir()
     stub = 'cat > "$REMEMBER_TEST_OUT/$(basename "$0").stdin"\n'
-    root = _fake_plugin(tmp_path, {name: stub for name in _HOOK_SCRIPT_NAMES})
+    root = _fake_plugin(tmp_path, {name: stub for name in _COPILOT_SCRIPT_NAMES})
     for loc, hook in _iter_entries():
         result = _run_launcher(
             root, env=_launcher_env(root, {"REMEMBER_TEST_OUT": str(out_dir).replace("\\", "/")}),
             command=hook["powershell"], policy="Restricted")
         assert result.returncode == 0, f"{loc}: {result.stderr!r}"
-        name = _script_named_by(hook["command"])
+        name = _script_named_by(hook["bash"])
         seen = (out_dir / f"{name}.stdin").read_bytes()
         # Exact: bash inherits the launcher's stdin, so nothing is re-encoded
         # and no CRLF is appended (the payload has no trailing newline).
