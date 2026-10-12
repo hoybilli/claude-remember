@@ -134,7 +134,7 @@ The live Windows runs used earlier forms of the entry (2026-09-30: `& "…\run-h
 
 ### 2026-10-08: the adapter layer
 
-The port no longer edits upstream's four core hooks or `hooks/hooks.json`; they are byte-identical to upstream `fd8b655` (`git diff fd8b655 HEAD -- <files>` empty, **observed**), so upstream's 120 KiB compile gate (compiled `session-start-hook.sh`: 122,785 bytes) is upstream's alone.
+The port no longer edits upstream's four core hooks or `hooks/hooks.json`; they are byte-identical to upstream `fd8b655` (empty `git diff`, **observed**), so upstream's 120 KiB compile gate (compiled `session-start-hook.sh`: 122,785 bytes) is upstream's alone.
 
 Probe of the same day (throwaway plugin with three manifests and recorder hooks; the macOS VS Code and desktop app rows ran on 2026-10-11). The records do not carry the Copilot versions; those shown are from [Versions](#versions) (**reasoned**).
 
@@ -148,20 +148,22 @@ Probe of the same day (throwaway plugin with three manifests and recorder hooks;
 | VS Code; desktop app | macOS 27 | root `plugin.json` | same | `bash` | reply not recorded; hooks fired (observed) |
 | Claude Code 2.1.284 | both | `.claude-plugin/plugin.json` only | Claude's own | `command` | reply not recorded; top-level envelope no, `hookSpecificOutput` yes (**reasoned**) |
 
-Layout: root `plugin.json` names `hooks/hooks.copilot.json`; `SessionStart`, `PostToolUse` and `SessionEnd` run `scripts/copilot-*-hook.sh`, which share `scripts/lib-copilot-adapter.sh`, rewrite the payload and delegate; `UserPromptSubmit` runs the core hook. Moved out of the core: the session-id prefix strip, the recap envelope, the transcript lookup (now handed over as `transcript_path`) and the debounce. Changed (read from the code): the debounce no longer pauses mid-turn saves, and `pipeline/haiku.py` has no Copilot summarizer warning.
+Layout: root `plugin.json` names `hooks/hooks.copilot.json`; `SessionStart`, `PostToolUse` and `SessionEnd` run `scripts/copilot-*-hook.sh`, which share `scripts/lib-copilot-adapter.sh`, rewrite the payload and delegate; `UserPromptSubmit` runs the core hook. Moved out of the core: the session-id prefix strip, the recap envelope, the transcript lookup and the debounce. Changed (read from the code): the debounce no longer pauses mid-turn saves, and `pipeline/haiku.py` has no Copilot summarizer warning.
 
-Suites at d5b5841 (**observed**; "compiled" is a `git archive` export after `compile_hooks.py --apply`, as CI runs it):
+Suites at d5b5841, **observed** ("compiled": an export after `compile_hooks.py --apply`, as in CI):
 
 | Leg | Python | Passed / failed / skipped | Coverage |
 |---|---|---|---|
-| Windows 11 | 3.14.4 | 2,748 / 5 / 1,814 | 90% |
+| Windows 11, jq 1.8.2 | 3.14.4 | 2,748 / 5 / 1,814 | 90% |
 | Windows 11, compiled | 3.14.4 | 2,709 / 6 / 1,852 | 90% |
 | WSL Ubuntu 26.04, jq 1.8.1 | 3.14.4 | 4,450 / 4 / 115 | 93% |
 | WSL, compiled | 3.14.4 | 4,398 / 4 / 167 | 93% |
-| macOS 27.0.1 arm64, /bin/bash 3.2.57, compiled | 3.14.7 | 4,384 / 0 / 183 | 93% |
+| macOS 27.0.1 arm64, /bin/bash 3.2.57 | 3.14.7 | 4,419 / 8 / 132, 8 errors | 93% |
+| macOS | 3.9.6 (Apple) | 4,418 / 9 / 132, 8 errors | 93% |
+| macOS, compiled | 3.14.7 | 4,384 / 0 / 183 | 93% |
 | macOS, compiled | 3.9.6 (Apple) | 4,383 / 1 / 183 | 93% |
 
-Windows fails `test_autonomous_log_retention_487` (3) and the `test_migration` `MsysBackslash` cases (2), all pre-existing; its export adds `test_doctor_sh_is_executable_in_git` (observed; the export losing the executable bit is **reasoned**). WSL fails only the pre-existing `test_lock_primitive` overlap cases. Apple's Python failed one traversal test, its bytecode landing in the sandboxed HOME; fixed in 8e3a2e4, Mac re-run pending. The macOS plain-export legs failed only git-dependent tests: that export had no `.git` (an export artifact, **reasoned** from the compiled legs). On bash 3.2 the four adapter modules gave 99 passed / 4 skipped (BASH_COMPAT cases); the SessionStart promo pair ran. No `sleep` or `copilot-session-end` process outlived a leg. Release tree: exit 0, 0 FAIL, 17 REVIEW, `session-start-hook.sh` 122,785 bytes. `claude plugin validate .` passed (a root `CLAUDE.md` warning). Live runs: see the next entries.
+Windows fails `test_autonomous_log_retention_487` (3) and the `test_migration` `MsysBackslash` cases (2), plus `test_doctor_sh_is_executable_in_git` on its export (cause, a lost executable bit: **reasoned**); WSL, the `test_lock_primitive` overlap cases. All are known pre-existing failures (an earlier `fd8b655` comparison, not re-run, is reasoned to hold). Apple's Python wrote bytecode into the sandboxed HOME, failing one traversal test (observed; sole cause **reasoned**); fixed in 8e3a2e4 (Windows simulation; Mac module re-run at 8f5a4b0: 19 / 0 / 0, **observed**). Beyond that failure on Apple's 3.9, the macOS plain legs failed only git-dependent tests (that export had no `.git`; **reasoned** from the compiled legs). On bash 3.2 the four adapter modules gave 99 passed / 4 skipped (BASH_COMPAT); the promo pair ran. No `sleep` process outlived any leg, nor `copilot-session-end` on Windows or macOS (positive control on macOS only). Release tree: exit 0, 0 FAIL, 17 REVIEW; `claude plugin validate .` passed (root `CLAUDE.md` warning). Live runs: see the next entries.
 
 ### 2026-09-30: VS Code Agents, first live runs
 
