@@ -1,33 +1,31 @@
-r"""The Copilot half of session-start-hook.sh's recap emit (issue: vscode).
+r"""The Copilot recap envelope (issue: vscode).
 
-Usage (from the hook, run from the plugin root)::
+Usage (from scripts/copilot-session-start-hook.sh, run from the plugin
+root)::
 
     python -m pipeline.copilot_recap [RECAP_FILE]
 
-The hook calls this once, and only when its cheap trigger fires (the session
-id carried the ``agent-host-*:/`` prefix, or ``COPILOT_CLI`` /
-``COPILOT_PLUGIN_ROOT`` is non-empty). It lives here rather than inline in
-the hook to keep the compiled hook inside v0.40.0's size budget
-(``HOOK_SCRIPT_MAX_BYTES``).
+The SessionStart wrapper runs the core session-start-hook.sh, unchanged,
+with its stdout captured to a temp file, and calls this once on that file
+whenever the core printed something and a Python interpreter was found.
 
-1. Applies the exact host rule, ``pipeline.host.copilot_session`` (described
-   in ``scripts/lib-session-id.sh``).
-2. Not the Copilot host: changes nothing, prints nothing, exits 0. The hook's
-   own branches (promo envelope, or the plain recap) then run unchanged.
-3. Copilot host, RECAP_FILE given (the hook buffered its recap there):
+1. Applies the host rule, ``pipeline.host.copilot_session``. The wrapper
+   exports ``REMEMBER_HOST_HINT=copilot``, so under it the rule always holds.
+2. Not the Copilot host: changes nothing, prints nothing, exits 0.
+3. Copilot host, RECAP_FILE given (the wrapper always gives one):
    rewrites RECAP_FILE, in place, to the recap wrapped as a top-level
    ``{"additionalContext": ...}`` -- the only shape VS Code was observed to
-   inject (VS Code 1.139.1 / Windows 11) -- byte for byte what the hook used
-   to print with ``jq -Rs '{additionalContext:.}'`` (see ``envelope``). The
-   hook then prints the file with its plain ``cat``. Python builds it, so the
-   envelope no longer needs jq.
-4. Copilot host, no RECAP_FILE (the recap went out live because a trace is
-   running or tmp/ is not writable): logs that, to the hook's own daily log.
-5. Copilot host either way: prints ``copilot`` (no newline), which the hook
-   stores as REMEMBER_HOST_HINT and uses to skip promos on that host.
+   inject (VS Code 1.139.1 / Windows 11) -- byte for byte what the inline
+   port used to print with ``jq -Rs '{additionalContext:.}'`` (see
+   ``envelope``). The wrapper then prints the file with its plain ``cat``.
+   Python builds it, so the envelope does not need jq.
+4. Copilot host, no RECAP_FILE (no caller does this today): logs that the
+   recap went out as plain text, to the daily log under REMEMBER_DIR.
+5. Copilot host either way: prints ``copilot`` (no newline). The wrapper
+   discards this output; it skips promos with REMEMBER_SUPPRESS_PROMO=1.
 
-Any failure raises, so the interpreter exits non-zero and the hook falls back
-to the plain recap and logs it. A write that fails part way puts the
+Any failure raises, so the interpreter exits non-zero and the wrapper falls
+back to the plain recap and logs it. A write that fails part way puts the
 original bytes back first (``_wrap_in_place`` says exactly what that
 guarantees), so that fallback prints the recap, not a half-written envelope.
 """

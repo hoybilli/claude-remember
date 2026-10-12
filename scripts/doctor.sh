@@ -356,8 +356,10 @@ else
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 # issue: vscode -- the Copilot session-state dir, resolved by the same library
-# the hooks use (sourced once, here; the last-save check further down uses it
-# too). A missing library skips both Copilot lines -- never an abort.
+# the Copilot hook wrappers use through scripts/lib-copilot-adapter.sh; the
+# core hooks do not source it (sourced once, here; the last-save check
+# further down uses it too). A missing library skips both Copilot lines --
+# never an abort.
 if source "$SCRIPT_DIR/lib-session-id.sh" 2>/dev/null; then
     remember_copilot_state_dir_into
     [ -d "$REMEMBER_COPILOT_STATE_DIR" ] && echo "OK   copilot session-state dir present: $REMEMBER_COPILOT_STATE_DIR (VS Code Agents transcripts resolve from here -- issue: vscode)"
@@ -757,8 +759,9 @@ fi
 # the Copilot CLI) never gets that directory -- its transcript is
 # <COPILOT_HOME or ~/.copilot>/session-state/<uuid>/events.jsonl -- so without
 # this the verdict ladder below read a healthy project with real saves as a
-# #144 slug mismatch. Resolved with the same lookup the hooks use
-# (lib-session-id.sh, sourced in the Paths section), against the session id
+# #144 slug mismatch. Resolved with the same lookup the Copilot PostToolUse
+# wrapper uses (remember_copilot_transcript_into from lib-session-id.sh,
+# sourced in the Paths section), against the session id
 # last-save.json recorded. Every failure here (no jq above, so no id; the
 # library missing) leaves the variable empty, which is exactly the
 # pre-existing behaviour -- never an abort.

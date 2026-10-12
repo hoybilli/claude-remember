@@ -313,9 +313,12 @@ def detect_host(overrides: Mapping[str, str] | None = None) -> Host:
 
 def copilot_session() -> bool:
     """Whether this process serves a VS Code Agents / Copilot session (issue:
-    vscode): ``remember_session_id_resolve``'s rule, described once in
-    ``scripts/lib-session-id.sh``; tests/test_session_start_host_rule_vscode.py
-    pins this against it.
+    vscode): ``REMEMBER_HOST_HINT=copilot`` first -- the Copilot hook wrappers
+    export it unconditionally (``scripts/lib-copilot-adapter.sh``), as only
+    the Copilot hosts load them -- else the first ``REGISTRY`` host whose
+    signature is set, which must be ``COPILOT``. There is no shell copy of
+    this rule any more; tests/test_session_start_host_rule_vscode.py pins the
+    Python side.
 
     Not ``detect_host() is COPILOT``: the hint comes first, and a signature
     value counts when it is non-empty, unstripped, as the shell's ``[ -n ]``
