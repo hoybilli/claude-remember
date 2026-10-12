@@ -77,8 +77,9 @@ class Sandbox:
         _events(path)
         return path
 
-    def run(self, script: str = "copilot-post-tool-hook.sh", session_id=f"agent-host-copilotcli:/{UUID}",
-            tool_input=None, extra_env=None) -> str:
+    def invoke(self, script: str = "copilot-post-tool-hook.sh",
+               session_id=f"agent-host-copilotcli:/{UUID}", tool_input=None,
+               extra_env=None) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(_STRIP_PREFIXES) and k not in _STRIP_NAMES}
         env.update({"HOME": posix(self.home), "USERPROFILE": str(self.home),
@@ -89,10 +90,25 @@ class Sandbox:
         payload = json.dumps({"hook_event_name": "PostToolUse", "session_id": session_id,
                               "cwd": str(self.project), "tool_name": "bash",
                               "tool_input": tool_input or {}, "tool_result": {}})
-        r = subprocess.run([BASH, posix(self.plugin / "scripts" / script)],
-                           input=payload.encode(), env=env, capture_output=True, timeout=120)
+        return subprocess.run([BASH, posix(self.plugin / "scripts" / script)],
+                              input=payload.encode(), env=env, capture_output=True, timeout=120)
+
+    def run(self, script: str = "copilot-post-tool-hook.sh", session_id=f"agent-host-copilotcli:/{UUID}",
+            tool_input=None, extra_env=None) -> str:
+        r = self.invoke(script, session_id, tool_input, extra_env)
         assert r.returncode == 0, decode_bash_output(r.stderr)
         return hook_logs(self.remember / "logs")
+
+    def stub_core(self, status: int) -> Path:
+        """Replace the core post-tool-hook.sh with a stub that drains stdin,
+        touches a marker, prints STUB-CORE and exits STATUS. Returns the
+        marker path."""
+        marker = self.tmp / "core-ran"
+        (self.plugin / "scripts" / "post-tool-hook.sh").write_bytes(
+            ("#!/bin/bash\ncat >/dev/null\n"
+             f': > "{posix(marker)}"\n'
+             f"echo STUB-CORE\nexit {status}\n").encode())
+        return marker
 
     def saves(self) -> list[list[str]]:
         return [p.read_text(encoding="utf-8").splitlines() for p in sorted(self.records.glob("save.*"))]
@@ -198,6 +214,34 @@ def test_a_double_backslash_in_the_path_survives(tmp_path):
     sb.run(extra_env={"COPILOT_HOME": str(base)})
     _argv, transcript = sb.wait_for_save()
     assert transcript == str(events)
+
+
+# --- Exit status and the missing library -----------------------------------
+
+@pytest.mark.parametrize("status", [0, 3])
+def test_wrapper_exits_with_the_cores_status(tmp_path, status):
+    """The core's exit code is forwarded; 0 is the control for 3. Also the
+    positive control for the missing-library case below: the same stub core
+    runs (marker written, its line printed) when the library is present."""
+    sb = Sandbox(tmp_path)
+    marker = sb.stub_core(status)
+    r = sb.invoke()
+    assert r.returncode == status, decode_bash_output(r.stderr)
+    assert marker.is_file()
+    assert decode_bash_output(r.stdout).strip() == "STUB-CORE"
+
+
+def test_missing_adapter_library_exits_0_without_delegating(tmp_path):
+    """A wrapper-side failure: lib-copilot-adapter.sh is gone from the
+    plugin copy. The wrapper exits 0 (not the stub's 3), prints nothing, and
+    the stub core never ran."""
+    sb = Sandbox(tmp_path)
+    marker = sb.stub_core(3)
+    (sb.plugin / "scripts" / "lib-copilot-adapter.sh").unlink()
+    r = sb.invoke()
+    assert r.returncode == 0, decode_bash_output(r.stderr)
+    assert r.stdout == b""
+    assert not marker.exists()
 
 
 # --- remember_copilot_transcript_into (lib-session-id.sh) -----------------

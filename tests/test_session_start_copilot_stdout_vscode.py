@@ -316,6 +316,23 @@ def test_wrapper_exits_with_the_cores_status(tmp_path, status):
     assert json.loads(r.stdout) == {"additionalContext": "STUB-RECAP\n"}
 
 
+def test_missing_adapter_library_exits_0_without_delegating(tmp_path):
+    """A wrapper-side failure: lib-copilot-adapter.sh is gone from the
+    plugin copy. The wrapper exits 0 and prints nothing, and the stub core
+    never ran (its STUB-RECAP line is absent). Positive control: the
+    stub-core status cases above, where the same stub's line comes out."""
+    plugin = _plugin_with_stub_core(tmp_path, 3)
+    (plugin / "scripts" / "lib-copilot-adapter.sh").unlink()
+    project, home = _sandbox(tmp_path)
+    env = _env(project, home, {"CLAUDE_PLUGIN_ROOT": str(plugin)})
+    r = subprocess.run([BASH, posix(plugin / "scripts" / "copilot-session-start-hook.sh")],
+                       input=_payload(project, UUID).encode(), env=env,
+                       capture_output=True, timeout=120)
+    assert r.returncode == 0, decode_bash_output(r.stderr)
+    assert b"STUB-RECAP" not in r.stdout
+    assert r.stdout == b""
+
+
 # --- PATH without jq (kept from the inline port's module) -------------------
 
 _JQ_NAMES = ("jq", "jq.exe")
