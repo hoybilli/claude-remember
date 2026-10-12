@@ -65,6 +65,12 @@ def _env(project, home, extra=None, project_dir=True):
                 "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT)})
     if project_dir:
         env["CLAUDE_PROJECT_DIR"] = str(project)
+    # No bytecode from the hook's Python. Apple-built Pythons set
+    # sys.pycache_prefix to $HOME/Library/Caches/com.apple.python, so with HOME
+    # pointed at the sandbox, the imports wrote .pyc files under home/ and the
+    # traversal test's "nothing created outside" check tripped (observed on
+    # macOS with Apple's Python 3.9.6; that this is the whole cause is reasoned).
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(extra or {})
     return env
 
