@@ -62,6 +62,12 @@ if [ "${1:-}" = "--sleeper" ]; then
             exit 0
         fi
     done
+    _CSE_SEEN=""
+    { read -r _CSE_SEEN < "$_CSE_FILE"; } 2>/dev/null
+    if [ "$_CSE_SEEN" != "$_CSE_STAMP" ]; then
+        log "hook" "copilot session-end: turn-end save superseded by a later turn"
+        exit 0
+    fi
     rm -f "$_CSE_FILE"
     remember_copilot_delegate "$_CSE_CORE" "$_CSE_PAYLOAD"
     exit $?

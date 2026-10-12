@@ -52,9 +52,10 @@ WINDOW_S = 2
 # The burst case needs turn 2's token on disk before turn 1's sleeper wakes.
 BURST_WINDOW_S = 8
 EXPIRY_WINDOW_S = 4
-# Hang detector only: the proof that the sleep is in the background is
-# returned_at < saved_at, not this number.
-HOOK_RETURN_BOUND_S = 10
+# The expiry case's proof that the window is slept in the background: the
+# hook returns at least this much sooner than EXPIRY_WINDOW_S (a wrapper that
+# slept the window in-process could not), and before the save lands.
+HOOK_RETURN_MARGIN_S = 1
 POLL_DEADLINE_S = 40
 KEY = "turn_end_debounce_seconds"
 DEFERRED = "copilot session-end: turn-end save deferred"
@@ -219,6 +220,22 @@ class Sandbox:
             f"saves={self.save_args()} launches={self.launches()}\n"
             f"log:\n{self.log_text()}")
 
+    def autonomous_save_logs(self) -> list[Path]:
+        """The per-spawn logs the core post-tool-hook.sh seeds synchronously,
+        just before it backgrounds save-session.sh."""
+        return sorted((self.remember / "logs" / "autonomous").glob("save-*.log"))
+
+    def stand_down_sleeper(self) -> None:
+        """Teardown for a case that deferred: end its sleeper the way a later
+        turn would, with a new token (it re-reads at least every 5 s and
+        exits on the mismatch). A no-op when nothing was deferred, so a
+        failure before the deferral is reported as itself, not as a timeout
+        here."""
+        if DEFERRED not in self.log_text():
+            return
+        self.token_path().write_text("test-teardown\n", encoding="utf-8")
+        self.wait_for(lambda: SUPERSEDED in self.log_text(), "the sleeper to stand down")
+
     def assert_immediate_single_save(self) -> None:
         """Shared assertions for every case that must delegate at once."""
         self.wait_for(lambda: len(self.saves()) >= 1, "the save to run")
@@ -261,7 +278,8 @@ def test_debounce_two_turns_in_a_burst_save_exactly_once(tmp_path):
 def test_debounce_window_expires_then_saves_and_the_hook_did_not_wait(tmp_path):
     sb = Sandbox(tmp_path, key_value=EXPIRY_WINDOW_S)
     elapsed, returned_at = sb.run_hook()
-    assert elapsed < HOOK_RETURN_BOUND_S, f"hook took {elapsed:.2f}s to return"
+    assert elapsed < EXPIRY_WINDOW_S - HOOK_RETURN_MARGIN_S, \
+        f"hook took {elapsed:.2f}s to return: it slept the {EXPIRY_WINDOW_S}s window itself"
     _token, token_mtime = sb.wait_for_token()
     sb.wait_for(lambda: len(sb.saves()) >= 1, "the deferred save to run")
     saved_at = sb.saves()[0].stat().st_mtime
@@ -284,32 +302,55 @@ def test_post_tool_delta_saves_are_not_paused_during_the_window(tmp_path):
     is not held while the sleeper waits, so a PostToolUse inside the window
     still triggers its delta save (argv: the id, no --force)."""
     sb = Sandbox(tmp_path, key_value=BURST_WINDOW_S)
-    sb.run_hook()
-    sb.wait_for_token()
-    sb.run_post_tool()
-    sb.wait_for(lambda: [UUID] in sb.save_args(), "the delta save")
-    assert sb.token_path().exists(), "the window had already closed"
+    try:
+        sb.run_hook()
+        sb.wait_for_token()
+        sb.run_post_tool()
+        # Positive control for the next case's negative: the core seeded its
+        # spawn log before it returned.
+        assert len(sb.autonomous_save_logs()) == 1, sb.autonomous_save_logs()
+        sb.wait_for(lambda: [UUID] in sb.save_args(), "the delta save")
+        assert sb.token_path().exists(), "the window had already closed"
+    finally:
+        sb.stand_down_sleeper()
+
+
+# A bash loop of short sleeps rather than `exec sleep 30`: on Git Bash,
+# killing the Popen handle of an exec'd `sleep` leaves sleep.exe running. The
+# loop ends on its own once STOP exists, or after about 60 s at most.
+_HOLDER = ('echo $$ > "$1"; i=0; '
+           'while [ ! -f "$2" ] && [ "$i" -lt 300 ]; do sleep 0.2; i=$((i + 1)); done')
 
 
 def test_a_live_save_pid_does_pause_the_delta_save(tmp_path):
     """Positive control for the case above: the same PostToolUse while
     tmp/save-session.pid names a live process is skipped by the core -- so
     the save above ran because the window holds no pid, not because the
-    core ignores the pid file."""
+    core ignores the pid file. The core logs nothing when it skips, so the
+    proof is what it does synchronously before it returns when it does
+    spawn (seeds logs/autonomous/save-*.log, rewrites the pid file): absent
+    here, present in the case above."""
     sb = Sandbox(tmp_path)
-    holder = subprocess.Popen([BASH, "-c", 'echo $$ > "$1"; exec sleep 30', "holder",
-                               posix(tmp_path / "holder.pid")])
+    pid_file = tmp_path / "holder.pid"
+    stop = tmp_path / "holder.stop"
+    holder = subprocess.Popen([BASH, "-c", _HOLDER, "holder", posix(pid_file), posix(stop)])
     try:
-        pid_file = tmp_path / "holder.pid"
         sb.wait_for(lambda: pid_file.exists() and pid_file.read_text().strip().isdigit(),
                     "the holder's pid")
-        (sb.remember / "tmp" / "save-session.pid").write_text(pid_file.read_text().strip() + "\n")
+        held = pid_file.read_text().strip()
+        save_pid = sb.remember / "tmp" / "save-session.pid"
+        save_pid.write_text(held + "\n")
         sb.run_post_tool()
-        time.sleep(2)
+        assert sb.autonomous_save_logs() == [], sb.autonomous_save_logs()
+        assert save_pid.read_text().strip() == held
         assert sb.saves() == [], sb.save_args()
     finally:
-        holder.kill()
-        holder.wait(timeout=30)
+        stop.write_text("")
+        try:
+            holder.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait(timeout=30)
 
 
 # --- Delegating at once --------------------------------------------------------
@@ -379,10 +420,8 @@ def test_debounce_above_an_hour_is_clamped_to_an_hour(tmp_path):
         assert f"{DEFERRED} 3600s (cooldowns.{KEY})" in log, log
         assert sb.saves() == []
     finally:
-        # Stand the hour-long sleeper down the way a later turn would: a new
-        # token. It checks at least every 5 s and exits on the mismatch.
-        sb.token_path().write_text("test-teardown\n", encoding="utf-8")
-        sb.wait_for(lambda: SUPERSEDED in sb.log_text(), "the clamped sleeper to stand down")
+        # The hour-long sleeper must not outlive the test.
+        sb.stand_down_sleeper()
     assert sb.saves() == []
 
 # Its paired control (a value inside the cap, not clamped) is the expiry case.
