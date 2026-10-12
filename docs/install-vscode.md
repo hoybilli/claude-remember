@@ -10,12 +10,14 @@ Versions run: VS Code 1.140.0 with Copilot Chat 0.68.0, Copilot CLI 1.0.92-3 (Wi
 
 - Bash: Git for Windows on Windows ([windows.md](windows.md)); stock bash on macOS.
 - Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it).
-- `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). The SessionStart recap no longer needs it: Python builds the JSON envelope the Copilot hosts inject (**reasoned** from the code and pinned by `tests/test_session_start_copilot_stdout_vscode.py`, which hides `jq`; the live host runs predate this). Without a working Python nothing is injected; `.remember/logs/memory-<date>.log` says `session-start: copilot envelope failed, plain recap`.
+- `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). The SessionStart recap does not need it: Python builds the JSON envelope the Copilot hosts inject (**observed** in `tests/test_session_start_copilot_stdout_vscode.py`, which hides `jq`). Without a working Python nothing is injected; `.remember/logs/memory-<date>.log` says `copilot session-start: envelope failed, plain recap`.
 - Claude Code's `claude` CLI on `PATH`, signed in: saves with new content, and a daily consolidation, are `claude -p` calls billed to your Claude account, not to Copilot (billing: reasoned).
 - The `copilot` CLI, for desktop app installs.
 - On Windows each hook starts through a small PowerShell launcher (`-ExecutionPolicy Bypass` for that one process); the live Windows runs used an earlier form of it, and the shipped form has run only in tests ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
 
 ## Install
+
+The plugin carries two manifests. The Copilot hosts load the root `plugin.json`, which binds `hooks/hooks.copilot.json`: three small wrappers (`scripts/copilot-*-hook.sh`) and the shared `user-prompt-hook.sh`, around the same hook scripts Claude Code runs (**observed** in the 2026-10-08 probe: with that manifest present, no host also loaded `hooks/hooks.json`). Claude Code reads only `.claude-plugin/plugin.json` and never loads the Copilot file (**observed**). Upgrading from an earlier copy of this port: VS Code users register the new folder (VS Code does not re-copy a registered one); CLI and desktop app users run `copilot plugin uninstall` and install again (**reasoned**: the CLI loads a marketplace plugin live, so a re-export in place may also be enough).
 
 First get a copy without `.git/`, as every successful VS Code run did; on macOS a git checkout can fail to sync. In a terminal (Git Bash on Windows; there write the path with forward slashes, `C:/tools/remember`):
 
@@ -67,13 +69,13 @@ In VS Code Agents, and in the desktop app (reasoned: it sends `complete` per tur
 
 **B. Debounced (`N` > 0).** A turn's save waits `N` seconds; if another turn ends first, the wait restarts (observed live in VS Code on Windows). A burst of turns costs one summarizer call, `N` seconds after the last turn. To turn it on, put `{"cooldowns": {"turn_end_debounce_seconds": 30}}` in `~/.remember/config.json` (all projects) or `<project>/.remember/config.json` (one project). The risk (reasoned, not tested): if the waiting save is ended inside those `N` seconds (a shutdown, or a host that takes its hooks' background processes down with it), the burst can go unsaved, unless the session has a later turn.
 
-Keep A unless a summarizer call per turn costs more than you want. Use a whole number from 0 to 3600; anything else is capped at 3600 or ignored ([configuration.md](configuration.md)). The project's `.remember/logs/memory-<date>.log` says `turn-end save deferred Ns` when a save is scheduled and `turn-end save superseded by a later turn` when one stands down. To turn it off, set the key back to `0` or remove it.
+Keep A unless a summarizer call per turn costs more than you want. Use a whole number from 0 to 3600; anything else is capped at 3600 or ignored ([configuration.md](configuration.md)). The project's `.remember/logs/memory-<date>.log` says `copilot session-end: turn-end save deferred Ns` when a save is scheduled and `copilot session-end: turn-end save superseded by a later turn` when one stands down. While a save waits, mid-turn saves are not held back (read from the code; pinned by `tests/test_session_end_turn_debounce_vscode.py`). To turn it off, set the key back to `0` or remove it.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| The assistant shows no memory of earlier sessions | No working Python (the log says `copilot envelope failed`); or the host was started from a terminal inside Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install Python 3.9+; start the host from a terminal outside Claude Code |
+| The assistant shows no memory of earlier sessions | No working Python (the log says `copilot session-start: envelope failed`); or the host was started from a terminal inside Claude Code (observed for the CLI on Windows, reasoned for VS Code) | Install Python 3.9+; start the host from a terminal outside Claude Code |
 | VS Code on macOS shows nothing from the plugin; its log (run **Developer: Open Logs Folder**; the file is `agenthost.log`) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: VS Code cannot copy its `.git/` socket and the sync aborts (observed on macOS) | Register a copy without `.git/` (observed), or run `git config core.fsmonitor false` and `git fsmonitor--daemon stop` in the checkout (not tried); register under a new path |
 | `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows. If `bash.exe` is elsewhere, set the user environment variable `REMEMBER_BASH` to its full path (for example `D:\Git\bin\bash.exe`) and restart the host (reasoned) |
 | The CLI shows no recap | Another plugin's hook failed in the same batch; the CLI drops the batch's output (observed on Windows) | Fix the other plugin |
