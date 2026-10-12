@@ -16,6 +16,7 @@ handlers per event, each with `bash` (macOS/Linux) and `powershell`
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -163,10 +164,16 @@ def test_named_script_exists(name):
     assert (SCRIPTS / name).is_file()
 
 
+_BOUND_SCRIPT = re.compile(r'/scripts/([^"\s]+)')
+
+
 def _unbound(script_names, handlers) -> list[str]:
-    """The names in SCRIPT_NAMES that no handler's `bash` value mentions."""
-    bound = " ".join(h.get("bash", "") for h in handlers)
-    return sorted(n for n in script_names if f"/scripts/{n}" not in bound)
+    """The names in `script_names` that no handler's `bash` value binds.
+
+    Each bound name is extracted whole from the `bash` values, so a name that
+    is only a prefix of a bound one does not count as bound."""
+    bound = {m.group(1) for h in handlers for m in _BOUND_SCRIPT.finditer(h.get("bash", ""))}
+    return sorted(set(script_names) - bound)
 
 
 def test_every_copilot_script_is_bound():
@@ -185,3 +192,5 @@ def test_the_binding_check_reports_an_unbound_name():
     assert _unbound(["copilot-session-end-hook.sh"], handlers) == []
     assert _unbound(["copilot-session-end-hook.sh", "copilot-stray.sh"], handlers) == [
         "copilot-stray.sh"]
+    # A name that is only a prefix of a bound name is not bound.
+    assert _unbound(["copilot-session-end"], handlers) == ["copilot-session-end"]
