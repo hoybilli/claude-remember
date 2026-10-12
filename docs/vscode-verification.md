@@ -165,6 +165,34 @@ Suites at d5b5841, **observed** ("compiled": an export after `compile_hooks.py -
 
 Windows fails `test_autonomous_log_retention_487` (3) and the `test_migration` `MsysBackslash` cases (2), plus `test_doctor_sh_is_executable_in_git` on its export (cause, a lost executable bit: **reasoned**); WSL, the `test_lock_primitive` overlap cases. All are pre-existing per the known-failure list; not compared against `fd8b655` this time (**reasoned**). Apple's Python wrote bytecode into the sandboxed HOME, failing one traversal test (observed; sole cause **reasoned**); fixed in 8e3a2e4 (Windows simulation; Mac module re-run at 8f5a4b0: 19 / 0 / 0, **observed**). Beyond that failure on Apple's 3.9, macOS plain legs failed only git-dependent tests (that export had no `.git`; **reasoned** from the compiled legs). On bash 3.2 the adapter modules gave 99 passed / 4 skipped (BASH_COMPAT); the promo pair ran. No `sleep` process outlived any leg; no `copilot-session-end` on macOS (positive control there; Windows' check could not see script names). Release tree: exit 0, 0 FAIL, 17 REVIEW; `claude plugin validate .` passed (root `CLAUDE.md` warning). Live runs: see the next entries.
 
+### 2026-10-12: live runs of the adapter layer (Windows)
+
+Commit c006446, exported with `git archive` into fresh folders: the CLI loaded it with `--plugin-dir`, the desktop app through a local marketplace (loaded live, nothing copied), VS Code through `chat.pluginLocations`. Copilot CLI 1.0.95-0, Python 3.14.4, jq 1.8.2. CLI headless (`copilot -p` from a shell); VS Code and the desktop app interactive (owner at the machine). **Observed** unless marked.
+
+| Check | VS Code Agents | Copilot CLI | Desktop app |
+| --- | --- | --- | --- |
+| 1. First line of injected context | `=== REMEMBER ===` | `=== REMEMBER ===` | `=== REMEMBER ===` |
+| 2. After one tool turn | `OK   PostToolUse marker present`; doctor: `OK   last save came from a VS Code Agents / Copilot session`, `VERDICT: capture is working` | doctor lines as VS Code; no tool turn recorded | as VS Code |
+| 3. Session end | `session-end: reason=complete`, save ran | same | same |
+
+4\. Claude Code with `--plugin-dir` on the same export: no `copilot session-` line. The model echoed its system prompt, so the hooks were checked directly: the core prints plain `=== REMEMBER ===`, the wrapper an `{"additionalContext": ...}` envelope.
+
+0 memory files written (VS Code; others not recorded). The desktop app opens no session in a project without a commit on `main` ("Could not resolve base branch 'main'"): its own workspace check, before any hook (**reasoned**). Sentinel: the installed plugin's git HEAD and worktrees, and `~/.copilot/installed-plugins`, unchanged.
+
+### 2026-10-12: live runs of the adapter layer (macOS)
+
+Same commit and routes, macOS 27.0.1 arm64, bash 3.2.57, Copilot CLI 1.0.94, Claude Code 2.1.284. CLI headless (`copilot -p`, a shell under `env -i`); VS Code and the desktop app interactive (owner at the machine). **Observed** unless marked.
+
+| Check | VS Code Agents | Copilot CLI | Desktop app |
+| --- | --- | --- | --- |
+| 1. First line of injected context | `=== REMEMBER ===` | `=== REMEMBER ===` | `=== REMEMBER ===` |
+| 2. After one tool turn | PostToolUse marker after one `ls` turn; 3 exchanges extracted | doctor lines as Windows; marker not itemised | as VS Code |
+| 3. Session end | `session-end: reason=complete`, save ran | same | same |
+
+Doctor: the Copilot last-save line, `VERDICT: capture is working`; `hook-errors.log` empty. 4\. Claude Code: its model quoted `SessionStart:startup hook success: === REMEMBER ===` (plain recap), `session-end: reason=other`, no `copilot session` line.
+
+Summarizer: 5 Haiku calls via the `claude` provider, all `SKIP`, 0 memory files. Sentinel: `~/.copilot/installed-plugins` empty before and after; `~/.copilot` gained only `settings.json` (marketplace registration) and the desktop app's `crash-reports/` startup file (**reasoned** not plugin-made).
+
 ### 2026-09-30: VS Code Agents, first live runs
 
 **Observed** on Windows 11: three agent sessions against an existing project that already had a `.remember/` written by Claude Code. The plugin was a `git archive` export (LF line endings) of commit 39d1610, registered through `chat.pluginLocations` and a window reload. Its `powershell` entries used the earlier `& "$env:CLAUDE_PLUGIN_ROOT\scripts\run-hook.ps1" <name>.sh` form; the `-File` form was not used in these sessions. The probes of that day dumped the environment and stdin from inside firing plugin hooks, so what they report was seen, not only reasoned from documentation. The probes ran against 1.139.1 ([Versions](#versions)).
