@@ -316,6 +316,32 @@ def test_wrapper_exits_with_the_cores_status(tmp_path, status):
     assert json.loads(r.stdout) == {"additionalContext": "STUB-RECAP\n"}
 
 
+def test_wrapper_temp_file_trap_keeps_the_config_cleanup(tmp_path):
+    """The wrapper's EXIT trap for its capture file must not replace the
+    one lib-memory-dir.sh registered for the merged config it wrote while
+    the adapter resolved the store. The stub core reports the inherited
+    REMEMBER_CONFIG and that it existed during the run (the positive
+    control); after the run it is gone, and so is the capture file."""
+    plugin = _plugin_with_stub_core(tmp_path, 0)
+    (plugin / "scripts" / "session-start-hook.sh").write_bytes(
+        b'#!/bin/bash\ncat >/dev/null\n'
+        b'[ -f "$REMEMBER_CONFIG" ] && printf "CFG-PRESENT\\n%s\\n" "$REMEMBER_CONFIG"\n'
+        b'exit 0\n')
+    project, home = _sandbox(tmp_path)
+    env = _env(project, home, {"CLAUDE_PLUGIN_ROOT": str(plugin)})
+    r = subprocess.run([BASH, posix(plugin / "scripts" / "copilot-session-start-hook.sh")],
+                       input=_payload(project, UUID).encode(), env=env,
+                       capture_output=True, timeout=120)
+    assert r.returncode == 0, decode_bash_output(r.stderr)
+    marker, cfg = json.loads(r.stdout)["additionalContext"].splitlines()
+    assert marker == "CFG-PRESENT"
+    assert "remember-config-" in cfg
+    assert not os.path.exists(cfg), cfg
+    left = sorted(p.name for p in (project / ".remember" / "tmp").iterdir()
+                  if p.name.startswith(("remember-config-", "copilot-session-start.")))
+    assert left == []
+
+
 def test_missing_adapter_library_exits_0_without_delegating(tmp_path):
     """A wrapper-side failure: lib-copilot-adapter.sh is gone from the
     plugin copy. The wrapper exits 0 and prints nothing, and the stub core

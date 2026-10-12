@@ -17,7 +17,9 @@
 #   3. python -m pipeline.copilot_recap FILE rewrites the file in place to
 #      the envelope (pipeline/copilot_recap.py:envelope), then it is printed.
 #   4. No python, or the helper fails: the plain recap is printed and
-#      `copilot session-start: envelope failed, plain recap` is logged.
+#      `copilot session-start: envelope failed, plain recap` is logged when
+#      the adapter resolved the store (_COPILOT_ADAPTER_PATHS=1); otherwise
+#      `log` is a no-op and the fallback goes unlogged.
 #   5. Nothing captured (the core printed nothing): nothing is printed.
 #
 # EXIT CODES
@@ -49,19 +51,28 @@ if [ -z "$_CSS_OUT" ]; then
     exit $?
 fi
 
-remember_copilot_delegate "$_CSS_CORE" "$_CSS_PAYLOAD" > "$_CSS_OUT"
-_CSS_RC=$?
-if [ -s "$_CSS_OUT" ]; then
-    _CSS_WRAPPED=0
-    if declare -F _remember_python >/dev/null 2>&1 && _remember_python 2>/dev/null; then
-        if (cd "$_COPILOT_ADAPTER_ROOT" && _remember_run_python -m pipeline.copilot_recap "$_CSS_OUT") >/dev/null 2>&1; then
-            _CSS_WRAPPED=1
+# The capture file goes even if the wrapper is killed before the rm below:
+# the subshell's own EXIT trap removes it. A trap set in this shell instead
+# would replace the one lib-memory-dir.sh already holds for the merged
+# config it wrote while the adapter resolved the store, and leak that file.
+(
+    trap 'rm -f "$_CSS_OUT"' EXIT
+    remember_copilot_delegate "$_CSS_CORE" "$_CSS_PAYLOAD" > "$_CSS_OUT"
+    _CSS_RC=$?
+    if [ -s "$_CSS_OUT" ]; then
+        _CSS_WRAPPED=0
+        if declare -F _remember_python >/dev/null 2>&1 && _remember_python 2>/dev/null; then
+            if (cd "$_COPILOT_ADAPTER_ROOT" && _remember_run_python -m pipeline.copilot_recap "$_CSS_OUT") >/dev/null 2>&1; then
+                _CSS_WRAPPED=1
+            fi
         fi
+        if [ "$_CSS_WRAPPED" != 1 ]; then
+            log "hook" "copilot session-start: envelope failed, plain recap"
+        fi
+        cat "$_CSS_OUT"
     fi
-    if [ "$_CSS_WRAPPED" != 1 ]; then
-        log "hook" "copilot session-start: envelope failed, plain recap"
-    fi
-    cat "$_CSS_OUT"
-fi
+    exit "$_CSS_RC"
+)
+_CSS_RC=$?
 rm -f "$_CSS_OUT"
 exit "$_CSS_RC"
