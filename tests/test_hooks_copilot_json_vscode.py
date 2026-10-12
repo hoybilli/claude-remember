@@ -47,6 +47,7 @@ _SCRIPTS_THAT_MUST_EXIST = (
     "user-prompt-hook.sh",
     "copilot-session-start-hook.sh",
     "copilot-post-tool-hook.sh",
+    "copilot-session-end-hook.sh",
 )
 
 
