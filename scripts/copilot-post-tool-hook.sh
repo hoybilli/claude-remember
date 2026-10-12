@@ -15,6 +15,13 @@
 # quote: the payload goes through with only the session-id prefix stripped,
 # and the core takes its own fallback.
 #
+# Every Copilot transcript is named events.jsonl, so the core's per-transcript
+# line-count file (#913, $REMEMBER_DIR/tmp/transcript-scan.events) is shared
+# by all Copilot sessions of a project; remember_copilot_scan_owner_check
+# (lib-copilot-adapter.sh) empties it when the session changes, so each
+# session's count starts from its own file. That couples this wrapper to the
+# core's file name (see the function's comment).
+#
 # EXIT CODES
 #   The core hook's. 0 without delegating when the adapter library is
 #   missing.
@@ -32,6 +39,7 @@ remember_copilot_session_id_into _CPT_ID "$_CPT_PAYLOAD" || _CPT_ID=""
 if [ -n "$_CPT_ID" ] && remember_copilot_transcript_into "$_CPT_ID"; then
     if remember_copilot_json_escape_path_into _CPT_ESCAPED "$REMEMBER_COPILOT_TRANSCRIPT"; then
         remember_copilot_prepend_field_into _CPT_PAYLOAD "$_CPT_PAYLOAD" transcript_path "$_CPT_ESCAPED"
+        remember_copilot_scan_owner_check "$_CPT_ID"
     fi
 fi
 remember_copilot_delegate "$_COPILOT_ADAPTER_DIR/post-tool-hook.sh" "$_CPT_PAYLOAD"

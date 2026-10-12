@@ -189,6 +189,40 @@ remember_copilot_json_escape_path_into() {
     return 0
 }
 
+# remember_copilot_scan_owner_check UUID -> 0, always. Upstream #913 keeps
+# the core post-tool hook's incremental line count in
+# $REMEMBER_DIR/tmp/transcript-scan.<transcript basename minus .jsonl>. Every
+# Copilot transcript is named events.jsonl, so all Copilot sessions of one
+# project share transcript-scan.events, and the core only checks that the byte
+# at the stored offset is a newline -- another session's file can pass that,
+# and the count is then wrong for the rest of that session. This records the
+# session that last scanned in $REMEMBER_DIR/tmp/copilot-scan-owner; when
+# UUID is another one it empties transcript-scan.events, which the core reads
+# as "no count" and rebuilds with one full scan. It couples the adapter to
+# that core file name: if upstream re-keys the file, this empties a file
+# nothing reads, and the tests in test_post_tool_copilot_transcript_vscode.py
+# that read transcript-scan.events fail and say so. Runs only when the store
+# resolved (_COPILOT_ADAPTER_PATHS=1). No fork: `read` and redirections are
+# builtins. Each `2>/dev/null` comes BEFORE its redirection, so a file that
+# cannot be opened costs a rescan and leaves no line in hook-errors.log
+# (bootstrap-dirs.sh sends the hooks' stderr there). Two Copilot chats of one
+# project scanning at the same moment can still interleave (narrow; only an
+# upstream re-key removes it).
+remember_copilot_scan_owner_check() {
+    [ "${_COPILOT_ADAPTER_PATHS:-0}" = 1 ] || return 0
+    local _rco_tmp="$REMEMBER_DIR/tmp" _rco_prev=""
+    [ -d "$_rco_tmp" ] || return 0
+    if [ -f "$_rco_tmp/copilot-scan-owner" ]; then
+        read -r _rco_prev 2>/dev/null < "$_rco_tmp/copilot-scan-owner"
+    fi
+    [ "$_rco_prev" = "$1" ] && return 0
+    if [ -f "$_rco_tmp/transcript-scan.events" ]; then
+        : 2>/dev/null > "$_rco_tmp/transcript-scan.events"
+    fi
+    printf '%s\n' "$1" 2>/dev/null > "$_rco_tmp/copilot-scan-owner"
+    return 0
+}
+
 # remember_copilot_delegate CORE PAYLOAD -> runs `bash CORE` with exactly
 # PAYLOAD's bytes on its stdin (closed after, so the core's `read -t 1` sees
 # EOF at once) and returns CORE's exit status. CORE's stdout and stderr are

@@ -216,6 +216,99 @@ def test_a_double_backslash_in_the_path_survives(tmp_path):
     assert transcript == str(events)
 
 
+# --- The core's line-count file, shared by every events.jsonl (#913) -------
+
+# Upstream #913 keeps a per-transcript line count in
+# $REMEMBER_DIR/tmp/transcript-scan.<transcript basename minus .jsonl>. Every
+# Copilot transcript is named events.jsonl, so all Copilot sessions of a
+# project share transcript-scan.events. The core only checks that the byte at
+# the stored offset is a newline, which another session's file can satisfy;
+# the wrapper therefore empties that file when a different session id scans.
+OTHER_UUID = "22222222-3333-4444-8555-666666666666"
+SCAN_FILE = "transcript-scan.events"
+
+
+def _sized_lines(size: int, count: int) -> bytes:
+    """COUNT JSON lines of exactly SIZE bytes each (newline included)."""
+    head, tail = b'{"t":"u","p":"', b'"}\n'
+    return (head + b"x" * (size - len(head) - len(tail)) + tail) * count
+
+
+def _session_events(sb: Sandbox, uuid: str, data: bytes) -> Path:
+    path = sb.home / ".copilot" / "session-state" / uuid / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _scan_count(sb: Sandbox) -> str:
+    return (sb.remember / "tmp" / SCAN_FILE).read_text(encoding="utf-8").strip()
+
+
+def test_a_new_copilot_session_gets_its_own_line_count(tmp_path):
+    """Session A leaves `500 10`; session B's file is 40 lines of 25 bytes,
+    with a newline at byte 500, so the core would resume from A's offset and
+    count 10 + 20 = 30. The wrapper makes it count B from the start: 40."""
+    sb = Sandbox(tmp_path)
+    _session_events(sb, UUID, _sized_lines(50, 10))
+    sb.run(session_id=UUID)
+    assert _scan_count(sb) == "500 10"  # positive control: the core wrote it
+    _session_events(sb, OTHER_UUID, _sized_lines(25, 40))
+    sb.run(session_id=f"agent-host-copilotcli:/{OTHER_UUID}")
+    assert _scan_count(sb) == "1000 40"
+    owner = (sb.remember / "tmp" / "copilot-scan-owner").read_text(encoding="utf-8")
+    assert owner.strip() == OTHER_UUID
+
+
+def test_the_same_session_keeps_its_incremental_count(tmp_path):
+    """Control for the reset above: a second call of the SAME session must
+    not empty the file. The stored count is made deliberately wrong (99
+    lines at a real line boundary), so only a resumed scan reports
+    99 + 5 = 104; a reset would report the true 15."""
+    sb = Sandbox(tmp_path)
+    events = _session_events(sb, UUID, _sized_lines(50, 10))
+    sb.run(session_id=UUID)
+    assert _scan_count(sb) == "500 10"
+    (sb.remember / "tmp" / SCAN_FILE).write_bytes(b"500 99\n")  # LF, as the core writes it
+    with events.open("ab") as f:
+        f.write(_sized_lines(50, 5))
+    sb.run(session_id=UUID)
+    assert _scan_count(sb) == "750 104"
+
+
+def test_alternating_sessions_each_count_their_own_file(tmp_path):
+    """Two Copilot chats of one project taking turns (VS Code allows
+    several): A, then B, then A again with 5 more lines. A's count must be
+    its own file's, 15 lines, not B's carried over."""
+    sb = Sandbox(tmp_path)
+    a = _session_events(sb, UUID, _sized_lines(50, 10))
+    sb.run(session_id=UUID)
+    _session_events(sb, OTHER_UUID, _sized_lines(25, 40))
+    sb.run(session_id=OTHER_UUID)
+    with a.open("ab") as f:
+        f.write(_sized_lines(50, 5))
+    sb.run(session_id=UUID)
+    assert _scan_count(sb) == "750 15"
+
+
+def test_an_unusable_owner_record_costs_a_rescan_not_the_hook(tmp_path):
+    """copilot-scan-owner that cannot be read or written (here a directory):
+    the hook still exits 0, writes nothing about it to hook-errors.log
+    (bootstrap-dirs.sh sends the hooks' stderr there, and doctor.sh reports
+    that file), and the count is still B's own, from a full scan. Positive
+    control for the count: the reset case above."""
+    sb = Sandbox(tmp_path)
+    (sb.remember / "tmp" / "copilot-scan-owner").mkdir()
+    _session_events(sb, UUID, _sized_lines(50, 10))
+    sb.run(session_id=UUID)
+    _session_events(sb, OTHER_UUID, _sized_lines(25, 40))
+    sb.run(session_id=OTHER_UUID)
+    assert _scan_count(sb) == "1000 40"
+    errors = sb.remember / "logs" / "hook-errors.log"
+    assert "copilot-scan-owner" not in (errors.read_text(encoding="utf-8", errors="replace")
+                                        if errors.exists() else "")
+
+
 # --- Exit status and the missing library -----------------------------------
 
 @pytest.mark.parametrize("status", [0, 3])
