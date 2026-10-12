@@ -46,6 +46,7 @@ _PS_VALUE = ('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Byp
 _SCRIPTS_THAT_MUST_EXIST = (
     "user-prompt-hook.sh",
     "copilot-session-start-hook.sh",
+    "copilot-post-tool-hook.sh",
 )
 
 

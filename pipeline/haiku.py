@@ -302,13 +302,10 @@ def _choose_summarizer_provider() -> str:
         )
         return "claude"
     if envelope == "copilot":
-        # issue: vscode -- same receipt #567 gave Antigravity: a positively
-        # identified non-Claude host billed through `claude -p`.
-        _warn(
-            f"WARNING: transcript {path!r} is a VS Code Agents / Copilot "
-            "session -- REMEMBER_SUMMARIZER=auto has no Copilot-native "
-            "summarizer and is falling back to 'claude'"
-        )
+        # issue: vscode -- no Copilot-native summarizer, so "claude", and
+        # silently: scripts/copilot-post-tool-hook.sh hands every save the
+        # Copilot transcript, so a #567-style receipt here would be logged on
+        # every save (adapter-layer spec, 4.3).
         return "claude"
     if envelope == "unrecognised":
         # #556: "unreadable or an unrecognised shape" used to be the whole
