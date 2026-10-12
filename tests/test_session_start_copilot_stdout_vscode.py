@@ -202,21 +202,28 @@ def test_promo_on_wrapper_is_the_bare_envelope_and_burns_no_marker(tmp_path, cor
 
 # --- Python missing or failing: plain recap, logged ------------------------
 
-_PY_NAMES = ("python3", "python", "py")
+# Every name detect-tools.sh's `_remember_python` probes (#1003: python3,
+# python, `py -3`, py, then python3.13 down to the 3.9 floor). Shadowing all
+# of them keeps a real versioned interpreter on the runner's PATH (setup-python
+# and Homebrew put python3.N there) from being picked when the generic stubs
+# fail; that pick would build the envelope and hide the plain-recap path.
+_PY_NAMES = ("python3", "python", "py") + tuple(f"python3.{n}" for n in range(13, 8, -1))
 
 
-def _python_stub_dir(tmp_path, version_ok):
-    """`python3` / `python` / `py` stubs to put first on PATH. Each appends
-    its argv to calls.txt and exits 1, except that `-V` (the interpreter
-    probe) exits 0 when VERSION_OK. Returns (dir, calls file)."""
+def _python_stub_dir(tmp_path, version):
+    """Stubs for every name in _PY_NAMES, to put first on PATH. Each appends
+    its argv to calls.txt and exits 1, except the interpreter probe `-V`:
+    with VERSION None it exits 1 (no Python); with a VERSION it prints
+    `Python <VERSION>` and exits 0, which #1003's floor check (3.9) then
+    accepts or rejects. Returns (dir, calls file)."""
     d = tmp_path / "python-stub"
     d.mkdir()
     calls = tmp_path / "calls.txt"
-    probe = "0" if version_ok else "1"
+    probe = "exit 1" if version is None else f"echo 'Python {version}'; exit 0"
     body = ("#!/bin/sh\n"
-            f"printf '%s\\n' \"$*\" >> '{posix(calls)}'\n"
+            f"printf '%s\n' \"$*\" >> '{posix(calls)}'\n"
             "for a in \"$@\"; do\n"
-            f"    [ \"$a\" = -V ] && exit {probe}\n"
+            f"    [ \"$a\" = -V ] && {{ {probe}; }}\n"
             "done\n"
             "exit 1\n")
     for name in _PY_NAMES:
@@ -236,7 +243,7 @@ def _calls(calls: Path) -> str:
 
 
 def test_without_python_the_plain_recap_goes_out_and_is_logged(tmp_path):
-    stub_dir, calls = _python_stub_dir(tmp_path, version_ok=False)
+    stub_dir, calls = _python_stub_dir(tmp_path, version=None)
     out, logs = _run(tmp_path, extra_env=_stub_env(stub_dir))
     _assert_plain(out)
     assert "-V" in _calls(calls)  # positive control: the stubs are what ran
@@ -244,8 +251,20 @@ def test_without_python_the_plain_recap_goes_out_and_is_logged(tmp_path):
     assert ENVELOPE_FAILED_LOG in logs
 
 
+def test_python_below_the_floor_sends_the_plain_recap(tmp_path):
+    """#1003: an interpreter that runs but reports 3.8 is not used. Positive
+    control: the helper-failure case below, whose 3.12 stub IS called with
+    `-m pipeline.copilot_recap`."""
+    stub_dir, calls = _python_stub_dir(tmp_path, version="3.8.10")
+    out, logs = _run(tmp_path, extra_env=_stub_env(stub_dir))
+    _assert_plain(out)
+    assert "-V" in _calls(calls)
+    assert "copilot_recap" not in _calls(calls)
+    assert ENVELOPE_FAILED_LOG in logs
+
+
 def test_helper_failure_sends_the_plain_recap_and_logs_it(tmp_path):
-    stub_dir, calls = _python_stub_dir(tmp_path, version_ok=True)
+    stub_dir, calls = _python_stub_dir(tmp_path, version="3.12.0")
     out, logs = _run(tmp_path, extra_env=_stub_env(stub_dir))
     _assert_plain(out)
     assert "-m pipeline.copilot_recap" in _calls(calls)

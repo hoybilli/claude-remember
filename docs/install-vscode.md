@@ -9,7 +9,7 @@ Versions run: VS Code 1.140.0 with Copilot Chat 0.68.0, Copilot CLI 1.0.92-3 and
 ## Requirements
 
 - Bash: Git for Windows on Windows ([windows.md](windows.md)); stock bash on macOS.
-- Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it).
+- Python 3.9+ (`python3` on `PATH`; Git for Windows does not include it). Since v0.43.1 an older Python is not used at all (#1003): the recap then goes out as plain text, which these hosts do not inject (see Troubleshooting). **Observed** on Windows 11 in `tests/test_session_start_copilot_stdout_vscode.py` with a stub reporting 3.8; Linux and macOS **reasoned** until it runs there.
 - `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). The SessionStart recap does not need it: Python builds the JSON envelope the Copilot hosts inject (**observed** in `tests/test_session_start_copilot_stdout_vscode.py`, which hides `jq`). Without a working Python nothing is injected; `.remember/logs/memory-<date>.log` says `copilot session-start: envelope failed, plain recap`.
 - Claude Code's `claude` CLI on `PATH`, signed in: saves with new content, and a daily consolidation, are `claude -p` calls billed to your Claude account, not to Copilot (billing: reasoned).
 - The `copilot` CLI, for desktop app installs.
@@ -75,7 +75,7 @@ Keep A unless a summarizer call per turn costs more than you want. Use a whole n
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| The assistant shows no memory of earlier sessions | No working Python (when the store resolved, the log says `copilot session-start: envelope failed`); or, before 2026-10-08, the host was started from a terminal inside Claude Code (observed for the CLI on Windows); the wrappers now always set the Copilot hint (**reasoned**, until live host runs confirm it) | Install Python 3.9+; on a copy older than 2026-10-08, start the host from a terminal outside Claude Code |
+| The assistant shows no memory of earlier sessions | No working Python 3.9 or later (an older one counts as none since v0.43.1, #1003; pinned by `tests/test_session_start_copilot_stdout_vscode.py`; when the store resolved, the log says `copilot session-start: envelope failed`); or, before 2026-10-08, the host was started from a terminal inside Claude Code (observed for the CLI on Windows); the wrappers now always set the Copilot hint (**reasoned**, until live host runs confirm it) | Install Python 3.9+; on a copy older than 2026-10-08, start the host from a terminal outside Claude Code |
 | VS Code on macOS shows nothing from the plugin; its log (run **Developer: Open Logs Folder**; the file is `agenthost.log`) says `Failed to sync plugin … fsmonitor--daemon.ipc` | A git checkout with `core.fsmonitor` on: VS Code cannot copy its `.git/` socket and the sync aborts (observed on macOS) | Register a copy without `.git/` (observed), or run `git config core.fsmonitor false` and `git fsmonitor--daemon stop` in the checkout (not tried); register under a new path |
 | `Git Bash not found` on stderr (Windows) | Git Bash missing | Install Git for Windows. If `bash.exe` is elsewhere, set the user environment variable `REMEMBER_BASH` to its full path (for example `D:\Git\bin\bash.exe`) and restart the host (reasoned) |
 | The CLI shows no recap | Another plugin's hook failed in the same batch; the CLI drops the batch's output (observed on Windows) | Fix the other plugin |
