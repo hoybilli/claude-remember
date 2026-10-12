@@ -7,6 +7,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-10-12 — Honest fork counts after the #1029/#1031 cut, the bracket-test dynamic-dispatch detector, and a named CI leg when pytest hangs
+
+### Fixed
+
+- Fixed #906: `compile_hooks.py`'s `_DYNAMIC_CALL_RE` dynamic-dispatch detector
+  matched `&& "$name"` even when `"$name"` was a test operand inside
+  `[[ ... ]]`/`[ ... ]`, not a real call through a variable -- the exact shape
+  that grew a compiled hook from ~122 KB to 135,889 B during #899's size work,
+  with no visible symptom besides the size. Operands inside bracket-test
+  spans are now masked before the dynamic-dispatch scan runs, and when
+  tree-shaking genuinely is disabled, `compile_hooks.py --apply` now prints
+  the reason and the triggering line to stderr instead of staying silent.
+
+- Corrects a process-count claim from this range's own v0.43.0 entries (#1011, #1017): "1 (`tail` only)" / "a second spawn, `wc`" counted only **exec'd binaries** -- programs named on PATH -- never the bash **subshell forks** a `$(...)` command substitution or a `|` pipe also creates, even when nothing inside them execs a new binary at all. A round-2 follow-up to this same fragment then asserted the regression it found against the wrong number: the whole below-threshold hook invocation's own real fork count (measured via `strace -f -e trace=clone,clone3,fork,vfork` on CI, every clone/fork/vfork anywhere in the process tree -- libs sourced, tool-detection probes, the background save detach, all of it) checked against 6, a figure that only ever described `_pt_scan_lines`'s own local contribution, not the whole hook. CI measured 67 on every run across every Linux leg, not below 6.
+
+  Measured the right way now: `tests/test_post_tool_total_processes_1011.py` runs the identical strace harness against three real trees on CI -- the tagged `v0.42.4` release, the tagged `v0.43.0` release immediately preceding this one, and this fix -- instead of asserting against a hand-picked threshold. CI-measured whole-hook totals for the below-threshold no-save path, minimum of 9 runs each, identical on every Linux leg: `v0.42.4` = 68, `v0.43.0` = 69, this fix (HEAD) = 67. The fix itself is real and small -- `_pt_scan_lines` now sets globals instead of running inside an outer command substitution, and its newline count uses a herestring into `wc -l` instead of a `printf | wc` pipe, removing two subshell forks -- and it does land below both baselines, but the whole-hook invocation still creates on the order of 67 processes for one no-save `PostToolUse` call. On the Windows 11 25H2 build #1011 originally reported against, each of those is a real kernel Token that leaks until reboot; a two-process improvement does not change that order of magnitude. Attributing which script lines and sourced libraries account for the bulk of the 67 is tracked separately, not in this fragment: see the newly filed follow-up issue.
+
+  The cooldown-active path's own reduction (skips the scan entirely) is unaffected by this correction and remains genuine.
+
+- Fixed #1014: a hung pytest leg on CI used to be cancelled by its own
+  job-level `timeout-minutes` with no log at all, leaving no way to tell
+  which test hung. `pyproject.toml` now sets `faulthandler_timeout = 900`
+  so a stuck test dumps every thread's traceback well before CI's own
+  25-minute step timeout fires, the "Run tests" step now runs under its
+  own `timeout-minutes: 25` and tees output to a log file that is uploaded
+  as an artifact under `if: always()`, and a Windows leg additionally
+  lists any surviving `wscript.exe`/`bash.exe`/`conhost.exe`/
+  `powershell.exe` processes at teardown. Proven on Linux (run 38122057767,
+  job 114445674357): the faulthandler traceback naming the stuck test is
+  present in the kept log. The equivalent Windows failure mode (a job
+  ending `cancelled` with no log at all, run 38122057767, job
+  114418645594) is not shown fixed by this change; tracked separately.
+
+- #1029: three unconditional per-call forks removed from `post-tool-hook.sh`, on top of CI-measured strace totals this range already tracks (`v0.42.4` = 68, `v0.43.0` = 69, prior HEAD per #1028 = 67). `_stdin_json_string` (`cwd`, `session_id`, `transcript_path`) was called through `X=$(...)` command substitution at three sites above the fast/slow-path split, each forking a subshell even though the function itself is pure parameter expansion -- the same cost class `lib-clock.sh`'s own `_remember_date_into` fix already removed elsewhere in this hook. Ported to the fork-free `_stdin_json_string_into` form `session-start-hook.sh` already used (#665, part of #660): identical matching algorithm (same first-occurrence scan, same #344 gap, same #829 double-backslash collapse), no behaviour change, three fewer forks on every invocation of this hook, cold-start and warm path alike.
+
+  `tests/test_post_tool_total_processes_1011.py`'s own fixture measures the cold-start path only (a brand-new project with no warmed caches), which is why #1011/#1028's own strace totals land near 67-69 rather than the much lower warm-path count a real session's later tool calls pay once a project has run once. On that warm path, the only forks left after this cut are `_pt_scan_lines`'s own `tail`+`wc` pair, already documented in-code as unavoidable without reintroducing #1017's quadratic bash-expansion regression -- every other candidate this issue named (`bootstrap-dirs.sh`'s directory creation, the `jq` config read, the `mktemp`+`mv` atomic-write patterns) traced to cold-path-only work already gated behind existence checks (#230/#666) or work inside the byte-pinned `lib-memory-dir.sh` (`tests/test_case_divergence_298.py` forbids touching it).
+
+  `tests/test_post_tool_total_processes_1011.py` now asserts an absolute budget (strictly below 67, this round's own prior total) for both the below-threshold and cooldown paths, in addition to the existing relative tag-comparisons, so a regression is caught even on a no-network CI leg where neither tagged baseline tree can be materialized. Confirmed by this pull request's own CI run, the same strace harness against the same three trees: the whole-hook, cold-start, below-threshold total is `v0.42.4` = 68, `v0.43.0` = 69, HEAD (this fix) = 64 -- three fewer than the 67 reasoned above, matching the three forks this fix removes. The warm-call cost (a project that already ran once, caches populated) is not measured by this fixture and no number is claimed for it.
+
+## [0.43.0] - 2026-10-11 — Fewer forks per PostToolUse call on bash 3.2/5, and a doctor warning for a Windows 11 25H2 kernel-Token leak
+
+### Added
+
+- doctor.sh now warns (never fails) on Windows when the current build is known-affected by a kernel Token-object leak (#1011, reported by @NanoInG) and the live foreground lock timeout is not 0. The warning points at a new docs/windows.md section covering the confirmed workaround, its logon-task requirement and focus-stealing trade-off, and Restart vs Shut down -- an opt-in system change the user decides on, never applied by this plugin itself.
+
+### Fixed
+
+- #913: `post-tool-hook.sh` no longer reads the whole transcript on every tool call. The line count that decides whether to fire a save now lives in a small sidecar keyed by the transcript's own name (`$REMEMBER_DIR/tmp/transcript-scan.<name>`, storing a byte offset and a line count), and the hook reads only the bytes appended since the last call -- `tail -c +OFFSET`, with its own first byte doubling as a validator against a shrunk or rewritten transcript, falling back to a full recount whenever that check fails. A record still being written (no trailing newline yet) is never counted and never advances the offset, so a half-written line is picked up whole on the next call. Separately, the cooldown check that decides whether a save can fire at all now runs BEFORE this scan rather than after it, so a tool call inside the post-save cooldown window skips the scan entirely -- as #1011 points out, on an affected Windows 11 25H2 build every avoided fork is a kernel Token object that never leaks, not merely latency saved. Which saves fire, and at what threshold, is unchanged.
+
+- Fixed #1011: the PostToolUse hook's no-save path (both the cooldown-active
+  branch and the below-threshold branch) forked 4 external processes per
+  tool call for work that needed none of them. The transcript lookup
+  (`ls -t ... | head -1`) is now a forkless glob-plus-mtime walk, falling
+  back to `ls -t` only on a genuine same-second mtime tie (bash 3.2's `-nt`
+  compares at whole-second resolution, which can tie two transcripts
+  written moments apart). The capture-alive marker's atomic write (`mv -f`)
+  is now skipped -- written in place instead, with no temp file and no
+  rename, to keep its mtime moving for doctor.sh's "PostToolUse still
+  firing" check -- whenever it already holds the current session id, which
+  is every tool call after the first in a session. Measured on real
+  `/bin/bash` 3.2 against current `main` (after #913's own incremental
+  transcript scan, which had already dropped the cooldown path from 5
+  spawns to 4 and the below-threshold path from 4 spawns to 4 with a
+  different shape -- `wc` replaced by `tail`): the cooldown path dropped
+  from 4 spawns (`ls`, `head`, `mv`, `date`) to 1 (`date` only), and the
+  below-threshold path from 4 spawns (`head`, `ls`, `mv`, `tail`) to 1
+  (`tail` only). On Windows 11 25H2, each of those spawns was a
+  console-attached process that leaked a kernel Token object until reboot,
+  not just latency; thanks to @NanoInG for tracing the kernel-side root
+  cause and reporting it. (#1017 later added a second spawn, `wc`, to the
+  below-threshold path specifically -- see that fragment -- so "1 (`tail`
+  only)" above describes the below-threshold path as it stood between
+  #1011 and #1017, not as it ships in this release; the cooldown-active
+  path, 1 spawn (`date` only), is unaffected.)
+
+- Fixed a flaky `doctor.sh` probe for #1011's kernel Token-leak check: the live foreground-lock-timeout read no longer compiles an inline C# P/Invoke via `Add-Type`/`csc.exe`, which could take over 20 seconds under load and made the check intermittently report "could not determine" instead of a real answer. It now reads the same Win32 API value with a compile-free `System.Reflection.Emit` P/Invoke; what the check warns on is unchanged.
+
+- Fixed #1011: `doctor.sh`'s two real-PowerShell probes (Windows build number, live foreground-lock timeout) each paid the FULL watchdog bound even when PowerShell answered in about a second -- the watchdog subshell's `sleep` inherited the function's own stdout, and every real caller reads that output via command substitution (`$(...)`), which blocks until every process holding the pipe open closes it, not just until the real data arrives. Measured on real `windows-latest` CI (PR #1024): each probe cost roughly 2x its own bound (about 11s at a 5s bound, about 31s at a 15s bound) instead of the ~1s PowerShell itself needed, adding roughly 30s to every `/remember:doctor` run on Windows. The watchdog now redirects its own output away from the caller's pipe and hands its `sleep` child's real PID back out through a small temp file, so an early PowerShell exit can kill that `sleep` directly too, leaving no stray process running for the rest of the old bound either way. `scripts/lib-detach.sh`'s own Windows-save watchdog (`_remember_detach_windows`, used on every Windows save) was audited for the same pattern and found already unaffected -- its watchdog already redirects its own output (from the same #1002 fix), confirmed here by direct measurement: all of its stub-driven tests return in well under 1.5s against its 15s bound.
+
+- Fixed #1017: `post-tool-hook.sh`'s incremental transcript scan (#913)
+  counted the newlines in each appended chunk with a per-byte bash
+  parameter substitution, which is quadratic in chunk size on bash 3.2
+  and 5.3 alike -- measured at 110.81s for a 2MB chunk on bash 5.3.15 and
+  415.67s for a 50KB chunk on `/bin/bash` 3.2.57 (this repo's documented
+  floor shell, and macOS's shipped default). This regressed the exact
+  scenario #913 was fixing -- the first post-upgrade call on an existing
+  session, which rescans the whole transcript -- to far worse than the
+  229ms whole-file `wc -l` #913 replaced. The count now runs through
+  `wc -l` instead, a linear C loop. That costs one extra fork per call
+  (`wc`, alongside the `tail` #913 already added) on the below-threshold
+  and warm-save paths -- #1011's own spawn-count claims for those two
+  paths are updated in its own fragment to say so; the cooldown-active
+  no-save path, which never reaches this scan at all, is unaffected and
+  stays at 1 spawn.
+
+- Fixed #1019: `post-tool-hook.sh`'s capture-alive marker (the file
+  doctor.sh reads to decide "is PostToolUse still firing") stopped
+  refreshing its mtime once SESSION_ID came back empty (the
+  basename-sanitiser route, e.g. a non-Claude-Code transcript name) and
+  the marker already held that same empty content -- #1016's in-place
+  write for the "already holds it" case writes zero bytes in that
+  situation, and a 0-byte write(2) never touches mtime (POSIX). A
+  healthy, actively-firing session could therefore report as
+  increasingly stale under doctor.sh's "PostToolUse marker present (Ns
+  old)" check. An empty SESSION_ID now always takes the atomic
+  tmp+mv branch instead, which touches mtime regardless of content; the
+  common (non-empty, unchanged) case keeps #1016's no-fork optimization
+  unchanged.
+
+- Fixed #1021: `post-tool-hook.sh`'s #353 sidecar-trust fast path extracted
+  the `"sessions"` object out of the whole `last-save.json` file with
+  `${_LAST_SAVE_CONTENT#*"sessions"}` then `${_SESSIONS_SCOPE%%\}*}` -- the
+  same quadratic bash parameter-expansion class #1017 fixed for
+  `_pt_scan_lines`'s newline count. Measured on real `/bin/bash` 3.2.57 with
+  "sessions" worst-cased at the end of a synthetic file: 2.05s at 10,000
+  sessions, 9.69s at 20,000 (pre-fix); 0.015s and 0.027s after. In real use
+  this path never reaches that shape: `cmd_save_position` caps the file at
+  `_POSITION_SLOTS` (32) sessions and always writes "sessions" as the FIRST
+  key, so every file measured on this machine topped out at ~1.55KB -- the
+  fix is defense-in-depth, not a response to an observed slowdown. The
+  extraction now runs through one builtin `[[ STR =~ REGEX ]]` match
+  (POSIX regexec, not bash's glob-match engine) instead -- no new fork.
+  Self-review caught that the first draft's `elif` fallback (kept for a
+  truncated/corrupted file with no closing brace after "sessions") still
+  reintroduced the quadratic shape on exactly that input; dropping the
+  regex's trailing `}` requirement removes the fallback entirely instead,
+  measured linear (0.022s) on a 20,000-session truncated file too.
+
+## [0.42.4] - 2026-10-10 — Windows PostToolUse saves were silently not running on v0.42.3 -- update now
+
+### Fixed
+
+- **Windows users on v0.42.3 should update: PostToolUse background saves were silently not running on Windows there, with no error anywhere -- macOS and Linux were unaffected.** Reported by @fmatamala (#1002). The PostToolUse hidden-launch route added for #1002 had two REASONED-only gaps a stub-`wscript.exe` CI leg could not see -- a `bash -c` script with embedded double quotes whose survival across the exec->CreateProcess->WSH argv hop was never confirmed on a real Windows host, and an unconditional success return after backgrounding `wscript.exe` that swallowed a Windows-Script-Host-disabled launch failure with no fallback. #1002's round 2 removes the embedded-quote argv entry entirely (the outfile redirect now happens inside `scripts/lib-detach-pidwrap.sh` itself, as its own argv entry, rather than as a quoted string another shell re-parses) and runs `wscript.exe` in the foreground so a launch failure now reaches the caller and triggers the existing nohup fallback instead of a silent skip. `tests/test_windows_real_wscript_1002.py` drives the real launcher against the real `wscript.exe` on the `windows-latest` CI legs, including a path with a space and WSH disabled via the registry.
+
+- Windows: #1002 round 3 ran the ORIGINAL, `v0.42.3`-shipped hidden-launch shape against a real `wscript.exe` for the first time (`tests/test_windows_real_wscript_v0_42_3_1002.py`, vendored bytes under `tests/fixtures/v0_42_3/`) -- round 2 had fixed the code and observed the NEW shape working, but never observed whether `v0.42.3` itself was actually broken in production. It also fixes a real regression round 2's own watchdog introduced: with Windows Script Host disabled by policy, every `_remember_detach_windows` call paid the full watchdog bound (a foreground `wscript.exe` call, killed after it times out) before falling back to `nohup` -- and since PostToolUse calls this on every tool call, an affected host stalled every single save by that amount, forever. `scripts/lib-detach.sh` now caches the "hidden route unusable" verdict after the first failure (keyed on `$PATH`, mirroring `scripts/detect-tools.sh`'s own #668 tool-verdict cache), so later saves on that host go straight to the `nohup` fallback. `tests/test_windows_real_wscript_1002.py::test_real_wscript_healthy_path_latency` measures the real hidden-route-versus-`nohup` cost on real `windows-latest` CI legs to size the watchdog bound against an observed number.
+
+- Windows: #1002 round 3 self-review (both the `Explore` and `oss:auditor` reviewers independently) found that `scripts/lib-detach.sh`'s new "hidden route unusable" verdict cache had no expiry, keyed only on `$PATH` -- but Windows Script Host's own enablement is a registry policy setting with no relationship to `$PATH`, so a host whose WSH got re-enabled would have stayed stuck on the slower `nohup` fallback indefinitely, with nothing to notice or self-correct it. The cache now carries a 1-hour TTL, bounding the damage to "at most one watchdog-bound stall per hour" instead of "once per host, forever". The same review also found the cache's own load/publish functions had zero direct test coverage; `tests/test_windows_hidden_detach_1002.py` now exercises both the short-circuit behaviour and the TTL expiry directly, and every existing stub test that calls `_remember_detach_windows` now isolates its own `$TMPDIR` so the suite no longer writes a real cache file into the actual host's temp directory on every run.
+
+- Windows: #1002 round 4 -- PR #1010's own CI (run #38062128176, job #114242348418) found the 5s watchdog bound shipped in round 3 was tuned on a 5-run sample (max 0.422s) that did not hold under a loaded runner: a sibling healthy call took 5.13s and this run's own call took 6.03s, tripping the watchdog and killing a real `wscript.exe` launch (`RC=137`), turning a Windows CI leg red on `main`. The bound is now 15s. A watchdog kill is also safer on its own: `scripts/post-tool-hook.sh`'s nohup fallback now checks whether `lib-detach-pidwrap.sh` already claimed `PID_FILE` and is still alive before launching a second, independent save -- narrowing, not fully eliminating, a double-save race the watchdog's own kill could otherwise trigger (`WshShell.Run` detaches the real command from `wscript.exe`'s own process, so killing `wscript.exe` does not stop it) -- scoped to exactly the rc the watchdog produces, so a genuine structural failure never risks silently dropping a save to a pid-reuse coincidence instead. `scripts/lib-detach.sh`'s "hidden route unusable" cache gives a watchdog kill (`RC=137`) its own, much shorter 5-minute verdict rather than the structural failure's 1-hour one (self-review finding: never caching it at all reopens the "stalls every save, forever" pathology for a host that is persistently, not just transiently, slower than the bound).
+
+## [0.42.3] - 2026-10-10 — fix the Windows console flash on PostToolUse saves and reject below-floor Python before it silently breaks consolidation
+
+### Fixed
+
+- Fixed: `docs/releasing.md`'s "Contacting Anthropic about a plugin" section still read as "No reply had arrived as of writing" about the plugin-level hold confirmed on v0.38.0, stale against #863's later comments. Updated to record that the hold later cleared on its own (no reply ever received), that a second confusing `COMMAND_SCRIPT_NOT_FOLLOWED` reading on 2026-10-06 turned out to come from the new-submission form's validator rather than the review gating an already-listed plugin's new versions, and that the portal's version list showed v0.38.0 through v0.41.0 all Approved with "Publish update" available and nothing held -- without erasing the fact that the hold was real when the mail was sent, since that still matches the unchanged "Reading a scan" section earlier in the same file. Cross-referenced the correction from both "Reading a scan" and the reuse-guidance checklist so neither reads as contradicting it, and noted that #140917199's Keywords/Short description question and #841 (the official-marketplace pin lag) both remain genuinely open rather than resolved (#863).
+
+- Fixed: `check_release_tree.py`'s wrapper-command allowlist (`_UNSCOPED_COMMANDS`) now also catches `command`, `nice` and `stdbuf` in front of an otherwise-scoped `allowed-tools` Bash grant, and the `..` path-escape check now catches a backslash-separated escape (`..\\..\\bin\\bash`), not only a forward-slash one (#950). `docs/releasing.md`'s wrapper-command coverage note is corrected to match.
+
+- Fixed: `scripts/log.sh`'s pre-#864 orphan-cache-path derivation (#972) no longer matches the `-v2-` substring inside `$TMPDIR` itself when that path happens to contain the literal text `-v2-` -- the substitution is now anchored to the cache filename's own segment, so a custom `TMPDIR` can never divert it from the real orphan it is meant to best-effort remove.
+
+- Fixed #973: the SESSION_DIR cache `post-tool-hook.sh` added for #913 was
+  keyed on `MEMORY_PROJECT_DIR`, which `lib-memory-dir.sh` deliberately keeps
+  the same across every linked worktree of one repo (#56) -- but the cached
+  value was computed from `$PROJECT`, which stays worktree-specific. Two
+  worktrees of the same repo shared one cache entry, so the second worktree's
+  hook invocations could silently replay the first worktree's `SESSION_DIR`.
+  The cache is now keyed on `$PROJECT` directly, matching what it actually
+  caches.
+
+- Fixed: `hooks.d/after_save/50-git-backup.sh`'s untrack receipt -- logged when a legacy `$SLUG/config.json` is untracked (#719) -- now tells the user to rotate any `haiku.oauth_token` it may have carried (`claude setup-token`), the same advice `docs/git-backup-security.md` SS4 already gave. Commit 73c77f8 (#918) reworded the doc's stale-token wording but silently dropped this sentence from the receipt in the same change, leaving the one moment a user actually learns their config.json was committed to history with no rotate advice at all (#974). Self-review on this same fix found the sibling DEFERRED-untrack message (reached when the store has other staged changes, so the untrack commit is left for the next backup) was silently missing the same advice even though the credential is already in git history either way -- it now carries the matching sentence too.
+
+- Fixed: two defects in the hard-disabled `hooks.d/after_save/60-git-reconcile.sh` (#975), ahead of its eventual re-enable once #969's real fix lands -- a `git diff --name-only` failure while computing the touched-paths restore scope is now logged and falls back to the pre-#952 scope instead of silently narrowing the restore to nothing, and that same diff output is now unquoted the same way the conflict-reporting path already was, so a touched path with non-ASCII/special bytes no longer silently drops out of a restore. The two remaining residual TOCTOU windows and the partial test coverage of `_grc_rebase_in_progress`'s call sites are re-verified still present and are still out of scope for a same-diff fix -- see the pull request for detail.
+
+- Fixed: `.github/scripts/check_release_tree.py` had sixteen `#`-comment-detecting checkers with no heredoc-boundary tracking of their own, unlike the one `_check_url_in_comment` fix landed for #919 -- a `#`-led line inside a typed `<<DELIM` heredoc body could be read as a real comment (or, for `_check_typed_heredoc` itself, a heredoc body line could be misread as a second, independent heredoc opener). Adjacent finding from #919's lane self-review (PR #978). Added a shared `_iter_non_heredoc_lines` tracker, mirroring `_check_url_in_comment`'s own, and routed sixteen of the eighteen checkers sharing the pattern through it (eight of them via the existing `_sh_lines` helper, fixed once for all eight); the remaining two (`_check_catch_all_in_loop`, `_check_single_line_delegate_positional`) carry their own in-code notes on why they were deferred rather than folded in silently. Self-review on this same fix also found `_iter_non_heredoc_lines` has no diagnostic of its own for an unclosed heredoc opener (unlike `_check_url_in_comment`'s hand-rolled copy of the same tracker) -- mitigated, not masked, because `check_tree` always runs that unchanged function on the same files with the same scope, so a genuinely unclosed heredoc still FAILs in the same run; documented and pinned with a regression test rather than reworked across every call site (#980).
+
+- Fixed (#981): the release-tree URL-host-in-comment guard's heredoc-open
+  tracking now skips `#`-comment lines and a `<<WORD`-shaped substring sitting
+  inside an ordinary quoted string, matching the sibling typed-heredoc guard's
+  own comment-skip -- either shape could previously leave the tracker "open"
+  for the rest of a shipped file, silently disabling the URL-host check for
+  every line after it. An opener that is never closed is now reported instead
+  of silently swallowing the rest of the file.
+
+- Fixed: `docs/configuration.md`'s `git_reconcile.enabled` row no longer says the hook "exits immediately, before even reading this flag" (#982) -- #979 made that false, and the row now describes what the hook actually does: read the flag first, then exit either way, logging a `disabled pending #969` notice to `hook-errors.log` when the flag is `true` (the exact trigger for `/remember:doctor`'s Recent errors WARN for users who opted in). The identical stale wording surviving in two test files' own prose (`tests/test_git_backup_push_rejected_253.py`, `tests/test_git_restore_hook_253.py`) is corrected too, and the now-stale `trap.d/969.stale-reconcile-prose-not-updated.md` bookkeeping fragment is removed.
+
+- Fixed: `hooks.d/after_save/50-git-backup.sh`'s "could not untrack" receipt (logged when `git rm --cached` or the untrack commit fails while stopping tracking a legacy `$SLUG/config.json`) now tells the user to rotate any `haiku.oauth_token` it may have carried (`claude setup-token`), matching the advice the succeeded and deferred untrack branches already carry (#974/#987). The config.json is already in this store's git history the moment `git ls-files` finds it tracked, regardless of which of the three branches fires -- this third sibling was found by self-review on #974/#987 and deliberately left for this follow-up (#989).
+
+- Fixed (#990): `_check_catch_all_in_loop` and `_check_single_line_delegate_positional` in `.github/scripts/check_release_tree.py` were the two checkers #980 deliberately left out of its `_iter_non_heredoc_lines` migration, but each docstring claimed the gap was "filed for a follow-up" when no such issue existed until this one. `_check_single_line_delegate_positional` now filters its extracted function-body string through `_iter_non_heredoc_lines` instead of a bare `.startswith("#")` test, so a heredoc attached to a function's single real statement no longer inflates the apparent line count and blinds the needle to it. `_check_catch_all_in_loop` needed more care: a first attempt swapping its own `enumerate(text.splitlines(), 1)` for the shared generator directly regressed in review -- the generator's heredoc-open detection has no visibility into this function's own multi-line in_string state, so a `<<WORD`-shaped substring sitting inside a tracked quoted string was misread as a real opener and silently swallowed every later line, including a genuine catch-all-in-loop, as fake heredoc body. Fixed instead by tracking heredoc delimiters inline (the same regexes `_iter_non_heredoc_lines` itself uses), gated so detection only runs on a line that already passed this function's own in_string/comment checks, so the two states can never step on each other. Both docstrings updated to say what was fixed and how, rather than naming a follow-up that no longer needs filing.
+
+- Fixed: `tests/test_git_backup_rotate_advice_974.py`'s `test_could_not_untrack_also_logs_rotate_advice` wrote its `pre-commit` hook script via `Path.write_text()` with no `newline=` guard, which on Windows would translate the shebang's `\n` to `\r\n` and corrupt it into a "bad interpreter" exec failure instead of the intended `exit 1`. Extracted into `_write_fail_hook`, now written via `open(..., newline="\n", encoding="utf-8")`, the same pattern `tests/test_autonomous_log_retention_487.py`'s `_write_shell_script` already uses for the identical reason. Inert today -- this whole file is skipped on `win32` for an unrelated reason (#79) -- but fixed rather than left as a trap for whoever narrows that skip later, with a new regression test pinning the write call itself rather than its bytes, since this platform's `os.linesep` is already `\n` and would not show the corrupted bytes either way (#994).
+
+- Fixed: on Windows 11 with Windows Terminal as the default terminal, PostToolUse's background save (the one the reporter actually measured flashing a new console window every few minutes) used a plain nohup-and-background launch, which still allocates a console on Windows regardless (#1002, reported by fmatamala). It now routes through a hidden wscript.exe launcher first (`scripts/lib-detach.sh`, `scripts/windows-hidden-run.vbs`, `scripts/lib-detach-pidwrap.sh`), falling back to the unchanged nohup line -- never to skipping the save -- whenever the hidden route is unavailable (wscript.exe or cygpath missing). The plugin's other three detached launches (SessionStart's consolidation, SessionEnd's self-redetach, and the Antigravity Stop hook's save) are deliberately NOT wired to the hidden launcher in this change: SessionStart's own compiled release-tree size has no budget margin left to absorb it, and wiring SessionEnd's self-redetach surfaced a real regression under review -- a wscript-launched child does not inherit the parent's stdin the way `nohup ... &` does, so SessionEnd would lose the hook's own JSON payload on the hidden route. All three are tracked in #1006 instead. Non-Windows behaviour is byte-for-byte unchanged. Whether the hidden route genuinely shows no console window is REASONED, not OBSERVED: there is no Windows box in this project's own hands to confirm it, and the reporter is asked to confirm in the pull request.
+
+- Fixed: `scripts/detect-tools.sh` picked the first Python that merely ran `-V` with no version check, so an interpreter below the floor this plugin supports (3.9 -- `pipeline/_tz.py` imports `zoneinfo`, stdlib only since 3.9) could be selected, and `/remember:doctor` reported "OK python ... 3.8.10" and "capture is working" while consolidation crashed on every attempt, silently, for months (reported by @amitpatelx). `_remember_python` now rejects any candidate below the floor and tries versioned fallbacks (`python3.9` through `python3.13`) before failing, with a FATAL message distinct from "no working Python found" when every interpreter present is simply too old; the floor itself is pinned against `tests/pep604_floor.py`'s own CI-matrix derivation rather than hardcoded a second time. The tool-verdict cache (#668) now also carries the floor it was written against, so a cache from before this fix is distrusted and re-probed rather than trusted forever; an interpreter swapped out in place at the same cached PATH (a pyenv switch, a reinstalled venv) is not re-probed by the cache itself -- that gap is closed separately, by `doctor.sh`'s own unconditional `-V` call below, for diagnosis rather than prevention. `scripts/doctor.sh` gained two independent WARNs, left out of the VERDICT ladder like the existing log-rotation and case-divergence checks: the selected Python is below the floor (a backstop for a bypass the detect-tools.sh fix does not itself cover), and consolidation's last recorded log entry is an `ERROR` with no later `done` -- the exact silent state this issue reports (#1003).
+
 ## [0.42.2] - 2026-10-08 — stop the #969 hard-disable notice from polluting hook-errors.log for every user, every save
 
 ### Fixed
@@ -4631,7 +4816,11 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.2...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.43.1...HEAD
+[0.43.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.1
+[0.43.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.0
+[0.42.4]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.4
+[0.42.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.3
 [0.42.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.2
 [0.42.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.1
 [0.42.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.0

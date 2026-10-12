@@ -199,15 +199,44 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 449): _CASE,
+    ("scripts/post-tool-hook.sh", 453): _CASE,
     # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
     # allowlisted ranges, re-pinned to where they now live). Shifted +3 again
-    # by #973's rewrite of that same cache's keying comment block.
-    ("scripts/post-tool-hook.sh", 726): _CASE,
-    ("scripts/post-tool-hook.sh", 769): _CASE,
-    ("scripts/post-tool-hook.sh", 825): _CASE,
+    # by #973's rewrite of that same cache's keying comment block, and again
+    # by #913's own incremental-scan rewrite (the cooldown block moved ahead
+    # of these three, and a fourth, equally ASCII-only range -- the new
+    # transcript-scan sidecar's own basename sanitiser -- was added between
+    # the first two). Re-pinned again after the #1013 rebase's own self-review
+    # fix. Shifted again by #1011's fork-reduction fix (the forkless
+    # transcript-lookup glob-walk, plus its same-second mtime-tie comment
+    # block, landed above the first two; the capture-alive skip-when-
+    # unchanged rewrite landed between the first and the other two), and once
+    # more by #1011's own self-review round (a stale-comment fix above the
+    # glob-walk, plus a longer comment on the capture-alive in-place write).
+    ("scripts/post-tool-hook.sh", 771): _CASE,
+    ("scripts/post-tool-hook.sh", 814): _CASE,
+    # The #913 transcript-scan sidecar's own key: a filename component, same
+    # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
+    # measured the same way, same reason. Shifted +27 (957->984, 1059->1086)
+    # by #1017's comment block replacing the quadratic newline count in
+    # _pt_scan_lines with a linear `wc -l`, and by #1019's comment block
+    # forcing the empty-SESSION_ID capture-alive write onto the atomic
+    # branch -- neither touches this range or adds a new one of its own.
+    # Shifted +5, then +7, then +4 more (984->989->996->1001,
+    # 1086->1091->1099->1103) by #1011 round 2's fork reduction and its own
+    # self-review follow-ups: two added lines (globals set before
+    # _pt_scan_lines), a net +3 inside the function (the pipe-based wc -l
+    # replaced by a herestring, wrapped in an `if` that skips the fork
+    # entirely when there is no complete line to count), +7 for
+    # `_remember_date_into` replacing `$(_remember_date +%s)` in the
+    # cooldown-elapsed check above this range (the same avoidable-subshell
+    # class this whole round exists to remove), and +4 for the comment
+    # above `_nl_count` that now describes the herestring instead of the
+    # pipe it replaced.
+    ("scripts/post-tool-hook.sh", 1005): _CASE,
+    ("scripts/post-tool-hook.sh", 1107): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

@@ -423,6 +423,22 @@ else
     _PY_DISPLAY="$_PY_PATH"
     [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
     echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
+    # #1003: detect-tools.sh's own probe now enforces this floor for every
+    # candidate it picks itself, but PYTHON can also arrive pre-set from the
+    # environment (`_remember_python`'s own early return on a non-empty
+    # PYTHON, above the candidate loop) -- a path that skips the probe,
+    # and with it the floor check, entirely. This is the backstop: it reads
+    # whatever PYTHON actually is, by whatever means it got there, and
+    # warns independently of how it was chosen. WARN, not FAIL, and the
+    # VERDICT below is deliberately left alone -- capture (PostToolUse)
+    # does not touch zoneinfo and is unaffected; only consolidation is.
+    if command -v _py_ok >/dev/null 2>&1 \
+        && ! _py_ok "$_PY_VERSION"; then
+        echo "WARN python: $_PY_VERSION is below this plugin's supported floor"
+        echo "     (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}) -- consolidation needs zoneinfo (stdlib only"
+        echo "     since 3.9) and will crash even though capture above reports OK"
+        echo "     (#1003). Install a newer Python."
+    fi
 
     if command -v jq >/dev/null 2>&1; then
         _JQ_PATH=$(command -v jq)
@@ -1155,6 +1171,305 @@ if [ -f "$_ROTATE_STATE" ]; then
 else
     echo "OK   Log rotation: no failure recorded"
 fi
+echo ""
+
+# ── Consolidation health (#1003) ────────────────────────────────────────────
+#
+# The silent state #1003 reports: capture (PostToolUse) keeps saving into
+# staging just fine, while consolidation -- a SEPARATE process, run-
+# consolidation.sh, with its own Python invocation -- fails every time
+# and never once completes. Nothing above catches this: "capture is
+# working" (the Verdict ladder, below) describes PostToolUse, not
+# consolidation, so a store can show a healthy save timestamp for months
+# while every consolidation attempt in the log reads "ERROR".
+#
+# run-consolidation.sh's own log() calls land in the same daily
+# memory-*.log files the Summarizer and SessionStart sections above
+# already walk (log.sh's "HH:MM:SS [component] message" format), so this
+# reads the newest "[consolidation] done" or "[consolidation] ERROR" line
+# across every log in chronological order -- the same last-match-wins
+# shape the Summarizer section above uses, for the same reason (the
+# newest-mtime FILE is not always the newest matching LINE).
+#
+# WARN, never FAIL, and the VERDICT is deliberately left alone, same as
+# log rotation and case divergence above: this is a second, independent
+# signal about consolidation specifically, layered on top of the existing
+# Python-floor and oversized-store checks rather than replacing either.
+echo "-- Consolidation health (#1003) --"
+_remember_ch_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_CH_FILES=()
+for _ch_f in "$_remember_ch_glob_dir"/logs/memory-*.log; do
+    [ -f "$_ch_f" ] && _CH_FILES+=("$_ch_f")
+done
+_CH_LAST_LINE=""
+if [ "${#_CH_FILES[@]}" -gt 0 ]; then
+    _CH_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _CH_SORTED=($(printf '%s\n' "${_CH_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_CH_OLD_IFS"
+    unset _CH_OLD_IFS
+    for _ch_f in "${_CH_SORTED[@]}"; do
+        _ch_match=$(grep -E '\[consolidation\] (done|ERROR)' "$_ch_f" 2>/dev/null | tail -n 1)
+        [ -n "$_ch_match" ] && _CH_LAST_LINE="$_ch_match"
+    done
+    unset _CH_SORTED
+fi
+unset _CH_FILES _remember_ch_glob_dir _ch_f
+if [[ "$_CH_LAST_LINE" == *"[consolidation] ERROR"* ]]; then
+    echo "WARN Consolidation's last recorded attempt failed, and no later attempt has"
+    echo "     succeeded since -- memory may still be captured (see Capture health"
+    echo "     above) while consolidation stays silently broken. Last entry:"
+    echo "     $_CH_LAST_LINE"
+elif [[ "$_CH_LAST_LINE" == *"[consolidation] done"* ]]; then
+    echo "OK   Consolidation: last recorded attempt succeeded ($_CH_LAST_LINE)"
+else
+    echo "--   No consolidation attempt recorded yet in $REMEMBER_DIR/logs"
+fi
+unset _CH_LAST_LINE
+echo ""
+
+# ── Windows kernel Token leak (#1011) ───────────────────────────────────────
+#
+# On Windows 11 25H2, a win32kfull.sys bug leaks one kernel Token object per
+# console-attached process start, never freed until a real Restart (Fast
+# Startup's Shut down keeps the leaked state). This plugin's hooks are a
+# heavy process creator, so an affected host accumulates leaked objects every
+# session. Reporter-confirmed on build 26200.9457; microsoft/terminal#20781
+# has since confirmed it on 26300.9550 too (both OPEN, no fix/KB yet -- see
+# docs/windows.md). The confirmed workaround -- setting the LIVE foreground
+# lock timeout to 0 -- has a real trade-off (apps can steal foreground focus
+# without asking) and resets at every logon, so it is an opt-in system
+# change a human decides on. This plugin must never apply it itself: WARN
+# only, a pointer to the docs, and the VERDICT is deliberately left alone,
+# same as log rotation and case divergence above -- capture itself is
+# entirely unaffected either way.
+#
+# #1015 review: this check used to read three env-var knobs
+# (_REMEMBER_DOCTOR_FORCE_WINDOWS / _REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE /
+# _REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE) unconditionally, which let a
+# real user SUPPRESS a genuine WARN by setting any one of them. There is no
+# such knob now -- tests/test_doctor_windows_fglock_1011.py instead sets
+# OS=Windows_NT (the same real signal _remember_doctor_is_windows() already
+# reads below) and puts a stub powershell.exe on PATH, matching how
+# tests/test_windows_hidden_detach_1002.py stubs wscript.exe.
+_remember_doctor_is_windows() {
+    local sys
+    sys="${OS:-}"
+    [ "$sys" = "Windows_NT" ] && return 0
+    sys="$(uname -s 2>/dev/null)"
+    [ "${sys#MINGW}" != "$sys" ] || [ "${sys#MSYS}" != "$sys" ] \
+        || [ "${sys#CYGWIN}" != "$sys" ]
+}
+
+# bounded by a plain bash watchdog (sleep + kill -9); missing powershell,
+# a non-zero exit, or a timeout all print nothing on purpose (#1002). The
+# bound defaults to 5s but is overridable per call ($2) -- #1015 review
+# round 4 OBSERVED this default too narrow for a timeout probe that used
+# Add-Type to compile inline C# via csc.exe (elapsed=10.81s on real
+# windows-latest CI, later exceeding even a widened 20s bound under more
+# load). #1011 round 5 removed that Add-Type compile entirely (see
+# _remember_doctor_fglock_timeout's own comment below) in favor of a
+# compile-free System.Reflection.Emit P/Invoke, so neither probe below
+# spawns a compiler process anymore. The shared default is 15s, not 5s: no
+# run has isolated a probe's own wall time (CI only measures whole tests,
+# each of which also sources this file), and a cold Windows PowerShell 5.1
+# start on a loaded host can take several seconds. Doctor is on-demand, so a
+# wide bound costs nothing on a healthy host and removes an unmeasured
+# margin -- the exact shape that turned main red twice. $2 still overrides.
+_remember_doctor_run_powershell_file() {
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-15}" _ps_out_file _ps_pid _ps_watchdog _ps_sleep_pid_file _ps_sleep_real_pid _ps_rc _ps_out
+
+if command -v powershell.exe >/dev/null 2>&1; then
+        _ps_bin="powershell.exe"
+    elif command -v powershell >/dev/null 2>&1; then
+        _ps_bin="powershell"
+    else
+        return 1
+    fi
+    _ps_out_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-out.XXXXXX") || return 1
+
+    # review finding: powershell.exe is a native Windows binary and does not
+    # reliably accept an MSYS/Cygwin POSIX path for -File, the same hazard
+    # lib-detach.sh's own wscript.exe launcher already guards with cygpath
+    # -w. Convert when cygpath is on PATH; fall back to the POSIX path
+    # otherwise rather than refusing outright -- a conversion that cannot
+    # run is not reason enough to give up on a check that might work anyway,
+    # and either way an unresolvable path still degrades to the "could not
+    # determine" WARN above, never a false OK.
+    if command -v cygpath >/dev/null 2>&1; then
+        _ps_file="$(cygpath -w "$_ps_file" 2>/dev/null)" || _ps_file="$1"
+    fi
+
+"$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
+    _ps_pid=$!
+
+    # #1011 round 6 review finding: this watchdog subshell used to inherit
+    # this function's own stdout/stderr unredirected. Every real caller
+    # captures this function's output via command substitution ($(...)),
+    # e.g. _FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout) -- and that
+    # read blocks until EVERY process holding the pipe's write end closes
+    # it, not just until the data it is waiting for arrives. `sleep` is
+    # forked as a child of the subshell below (the subshell runs two
+    # sequential commands, so bash cannot exec-replace it), and that child
+    # kept the write end open for the FULL $_ps_timeout bound even after
+    # PowerShell had already answered and this function had already
+    # printed its real result (observed on real windows-latest CI, PR
+    # #1024 merge-check logs: each probe cost ~2x its own bound). Closing
+    # the subshell's own fds (below) removes the wait.
+    #
+    # Reaping the watchdog early (once PowerShell answers) must also reap
+    # its `sleep` child, not just the subshell -- `kill` on the subshell's
+    # own PID does not touch a child it already forked, so sleep would
+    # otherwise be orphaned and keep running for the rest of its own bound
+    # (a stray process, even once it no longer blocks anything). A first
+    # attempt moved `sleep` out to be a direct child of THIS function so it
+    # could be killed directly -- but that makes the subshell's own `wait`
+    # target a SIBLING process, not its own child, which bash refuses
+    # ("wait: pid N is not a child of this shell") and returns from
+    # immediately, firing the kill -9 right away regardless of the real
+    # bound (caught in self-review before this reached CI). `wait` can
+    # only ever target a process's own direct child, so the subshell must
+    # keep `sleep` as ITS OWN child -- the fix instead has the subshell
+    # hand its sleep child's real PID back out through a small temp file,
+    # so the reap path below can `kill` that PID directly (killing does
+    # NOT require a parent-child relationship) without needing to `wait`
+    # on it from outside.
+    _ps_sleep_pid_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-sleep.XXXXXX") || _ps_sleep_pid_file=""
+    (
+        sleep "$_ps_timeout" &
+        _ps_sleep_real_pid=$!
+        if [ -n "$_ps_sleep_pid_file" ]; then
+            printf '%s' "$_ps_sleep_real_pid" >"$_ps_sleep_pid_file" 2>/dev/null
+        fi
+        wait "$_ps_sleep_real_pid" 2>/dev/null
+        kill -9 "$_ps_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    _ps_watchdog=$!
+    wait "$_ps_pid" 2>/dev/null
+    _ps_rc=$?
+    # review finding: the watchdog subshell above forks `sleep` and only
+    # AFTERWARDS writes that child's real PID out to $_ps_sleep_pid_file --
+    # a real gap, not merely a theoretical one: a 0.3s delay manufactured
+    # between those two lines reliably reproduced a reap landing here
+    # before the write did, finding the file still empty and falling
+    # through to "kill $_ps_watchdog" below, which cannot touch a child
+    # the subshell already forked -- leaving that `sleep` to run out its
+    # own full bound, orphaned. One bounded 1s retry closes the window a
+    # fast PowerShell exit can realistically race into, without turning
+    # this into a busy-poll whose real margin would vary with host speed.
+    if [ -n "$_ps_sleep_pid_file" ] && [ ! -s "$_ps_sleep_pid_file" ]; then
+        sleep 1
+    fi
+    if [ -n "$_ps_sleep_pid_file" ] && [ -s "$_ps_sleep_pid_file" ]; then
+        kill "$(cat "$_ps_sleep_pid_file" 2>/dev/null)" 2>/dev/null
+    fi
+    rm -f "$_ps_sleep_pid_file" 2>/dev/null
+    kill "$_ps_watchdog" 2>/dev/null
+    wait "$_ps_watchdog" 2>/dev/null
+
+_ps_out=$(tr -d '\r' <"$_ps_out_file" 2>/dev/null | tr -d '[:space:]')
+    rm -f "$_ps_out_file"
+    if [ "$_ps_rc" -ne 0 ] || [ -z "$_ps_out" ]; then
+        return 1
+    fi
+    printf '%s' "$_ps_out"
+}
+
+# live Windows build number via [Environment]::OSVersion.Version.Build.
+_remember_doctor_fglock_build() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-build.XXXXXX") || return 1
+    # review finding: if this mv fails, _ps_script keeps its extension-less
+    # name, powershell -File (which requires .ps1) then errors, and the
+    # caller reports its own "could not determine" WARN -- a safe but
+    # otherwise-undocumented degrade, named here so a future "always WARNs
+    # could-not-check on this host" report has somewhere to start looking.
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+    printf '%s\n' '[Environment]::OSVersion.Version.Build' >"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+# live SPI_GETFOREGROUNDLOCKTIMEOUT read. Compile-free P/Invoke via
+# System.Reflection.Emit (DefineDynamicAssembly -> DefineDynamicModule ->
+# DefineType -> DefinePInvokeMethod -> CreateType) -- #1011 round 5: the
+# previous Add-Type approach shells out to csc.exe to compile inline C#,
+# and that compile step was measured to take anywhere from ~10.8s to over
+# 20s on real windows-latest CI, making this probe flaky by host load
+# rather than by anything this plugin's own logic does. Reflection.Emit
+# builds the same P/Invoke signature at runtime with no compiler process,
+# and works on both Windows PowerShell 5.1 and pwsh 7.
+_remember_doctor_fglock_timeout() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
+    # same mv-may-fail degrade as _remember_doctor_fglock_build above.
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+
+printf '%s\n' '$asmName = New-Object System.Reflection.AssemblyName("RememberFgAsm")' >"$_ps_script"
+    printf '%s\n' '$asmBuilder = [System.AppDomain]::CurrentDomain.DefineDynamicAssembly($asmName, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)' >>"$_ps_script"
+    printf '%s\n' '$moduleBuilder = $asmBuilder.DefineDynamicModule("RememberFgMod")' >>"$_ps_script"
+    printf '%s\n' '$typeBuilder = $moduleBuilder.DefineType("RememberFg", [System.Reflection.TypeAttributes]::Public)' >>"$_ps_script"
+    printf '%s\n' '$paramTypes = [Type[]]@([uint32], [uint32], [uint32].MakeByRefType(), [uint32])' >>"$_ps_script"
+    printf '%s\n' '$methodAttrs = [System.Reflection.MethodAttributes]"Public,Static,PinvokeImpl"' >>"$_ps_script"
+    printf '%s\n' '$methodBuilder = $typeBuilder.DefinePInvokeMethod("SystemParametersInfo", "user32.dll", $methodAttrs, [System.Reflection.CallingConventions]::Standard, [bool], $paramTypes, [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Auto)' >>"$_ps_script"
+    # review finding: DefinePInvokeMethod, unlike Add-Type, does NOT infer
+    # PreserveSig for a non-void P/Invoke return type -- without it the CLR
+    # applies COM/HRESULT-style return marshaling and the call fails on
+    # every real host, not just intermittently. The MSDN DefinePInvokeMethod
+    # sample sets this explicitly for exactly this reason.
+    printf '%s\n' '$methodBuilder.SetImplementationFlags($methodBuilder.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig)' >>"$_ps_script"
+    printf '%s\n' '$fgType = $typeBuilder.CreateType()' >>"$_ps_script"
+    printf '%s\n' '$fg = 0' >>"$_ps_script"
+    printf '%s\n' '$fgType::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
+    printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
+    # Compile-free, so this probe no longer needs the wider 20s bound the
+    # Add-Type version required -- it stays on the same default as the
+    # build probe above (plain PowerShell startup, no compiler process).
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+_FGLOCK_IS_WIN=0
+if _remember_doctor_is_windows; then
+    _FGLOCK_IS_WIN=1
+fi
+
+if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
+    echo "-- Windows foreground-lock check (#1011) --"
+    _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
+
+    if [ -z "$_FGLOCK_BUILD" ] || [[ "$_FGLOCK_BUILD" == *[!0-9]* ]]; then
+        echo "WARN Could not determine the Windows build number (PowerShell unavailable,"
+        echo "     slow, or returned something unexpected) -- the #1011 kernel Token-leak"
+        echo "     check could not run. See docs/windows.md."
+    elif [ "$_FGLOCK_BUILD" -lt 26200 ]; then
+        echo "OK   Windows build $_FGLOCK_BUILD is not known-affected by #1011's kernel"
+        echo "     Token leak (confirmed from build 26200)"
+    else
+
+_FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
+
+        if [ -z "$_FGLOCK_TIMEOUT" ] || [[ "$_FGLOCK_TIMEOUT" == *[!0-9]* ]]; then
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the live foreground lock timeout could not be read"
+            echo "     (PowerShell unavailable, slow, or returned something unexpected) --"
+            echo "     cannot tell whether the opt-in workaround is applied. See docs/windows.md."
+        elif [ "$_FGLOCK_TIMEOUT" = "0" ]; then
+            echo "OK   Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the foreground lock timeout is already 0 (opt-in workaround applied)"
+        else
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token leak"
+            echo "     (one win32kfull.sys Token object per console-attached process start,"
+            echo "     freed only by a Restart) -- foreground lock timeout is $_FGLOCK_TIMEOUT, not"
+            echo "     0. This plugin's hooks spawn many such processes. An opt-in workaround,"
+            echo "     with a real trade-off, is in docs/windows.md; this plugin never applies"
+            echo "     it on its own."
+        fi
+        unset _FGLOCK_TIMEOUT
+    fi
+    unset _FGLOCK_BUILD
+fi
+unset _FGLOCK_IS_WIN
 echo ""
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
