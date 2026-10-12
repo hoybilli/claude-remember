@@ -29,8 +29,10 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git B
 PREFIXED = f"agent-host-copilotcli:/{UUID}"
 
 
-def _bash(body: str, *args: str, stdin: bytes = b"", env: dict | None = None):
-    """Source both libraries, run BODY with ARGS as $1..; return the result.
+def _bash(body: str, *args: str, stdin: bytes = b"", env: dict | None = None,
+          cwd: Path | None = None, session_lib: bool = True):
+    """Source both libraries (only LIB when SESSION_LIB is False), run BODY
+    with ARGS as $1..; return the result.
 
     ARGS travel in the environment (REMEMBER_TEST_ARG_<n>), not on the
     command line: on Windows a double quote or a run of backslashes in an
@@ -40,9 +42,10 @@ def _bash(body: str, *args: str, stdin: bytes = b"", env: dict | None = None):
     for n, value in enumerate(args, 1):
         env[f"REMEMBER_TEST_ARG_{n}"] = value
         names.append(f'"$REMEMBER_TEST_ARG_{n}"')
-    code = (f'. "{posix(SESSION_LIB)}"\n. "{posix(LIB)}"\n'
+    pre = f'. "{posix(SESSION_LIB)}"\n' if session_lib else ""
+    code = (f'{pre}. "{posix(LIB)}"\n'
             f'set -- {" ".join(names)}\n{body}')
-    return subprocess.run([BASH, "-c", code], input=stdin,
+    return subprocess.run([BASH, "-c", code], input=stdin, cwd=cwd,
                           capture_output=True, env=env, timeout=60)
 
 
@@ -183,9 +186,65 @@ def test_escaped_path_round_trips_through_the_core_reader():
     assert out == path
 
 
+# --- The backslash edits under pre-4.3 replacement quoting ------------------
+# Before bash 4.3 a quoted replacement inside a double-quoted
+# ${var//pat/"rep"} keeps its quotes (macOS ships 3.2). BASH_COMPAT=42 makes
+# a newer bash behave that way, so the edits are pinned under it here; real
+# bash 3.2 is observed on the macOS leg (Task 8).
+
+def _compat42_env() -> dict:
+    return dict(os.environ, BASH_COMPAT="42")
+
+
+def _compat42_supported() -> bool:
+    if BASH is None:
+        return False
+    r = subprocess.run([BASH, "-c", 'printf "%s %s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+                       capture_output=True, timeout=60)
+    major, minor = (int(x) for x in decode_bash_output(r.stdout).split())
+    return (major, minor) >= (4, 3)
+
+
+compat42 = pytest.mark.skipif(not _compat42_supported(),
+                              reason="BASH_COMPAT needs bash >= 4.3")
+
+
+@compat42
+def test_compat42_really_keeps_quotes_in_a_double_quoted_replacement():
+    """Positive control for the two cases below: under BASH_COMPAT=42 the
+    shape they guard against does misbehave, so they are not vacuous."""
+    r = subprocess.run([BASH, "-c", 'x=a/b; s=/; printf "%s" "${x//"$s"/"$s$s"}"'],
+                       capture_output=True, env=_compat42_env(), timeout=60)
+    assert decode_bash_output(r.stdout) != "a//b"
+
+
+@compat42
+def test_escape_doubles_backslashes_under_compat42():
+    out = _out('remember_copilot_json_escape_path_into v "$1"; printf "%s" "$v"',
+               "C:\\x\\y", env=_compat42_env())
+    assert out == "C:\\\\x\\\\y"
+
+
+@compat42
+def test_field_into_unescapes_backslashes_under_compat42():
+    out = _out('remember_copilot_field_into v cwd "$1"; printf "%s" "$v"',
+               '{"cwd":"C:\\\\x\\\\y"}', env=_compat42_env())
+    assert out == "C:\\x\\y"
+
+
+@compat42
+def test_escaped_path_round_trips_under_compat42():
+    path = "C:\\Users\\x\\\\y"
+    out = _out('remember_copilot_json_escape_path_into e "$1"\n'
+               'remember_copilot_prepend_field_into p "{}" transcript_path "$e"\n'
+               'remember_copilot_field_into back transcript_path "$p"\n'
+               'printf "%s" "$back"', path, env=_compat42_env())
+    assert out == path
+
+
 # --- remember_copilot_read_stdin_into ---------------------------------------
 
-def test_read_stdin_takes_every_byte():
+def test_read_stdin_keeps_every_byte_before_the_trailing_newlines():
     payload = '{"a":"ünï – 日本"}\n{"b":1}'
     out = _out('remember_copilot_read_stdin_into v; printf "%s" "$v"', stdin=payload.encode("utf-8"))
     assert out == payload
@@ -241,9 +300,26 @@ def test_init_without_a_project_still_succeeds_with_paths_off(tmp_path):
     env = {k: v for k, v in os.environ.items()
            if k not in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR",
                         "REMEMBER_HOOK_CWD", "REMEMBER_DIR")}
+    env.update({"HOME": posix(tmp_path), "USERPROFILE": str(tmp_path)})
     out = _out(f'remember_copilot_adapter_init "{posix(SCRIPTS)}/copilot-x-hook.sh"; rc=$?\n'
-               'log hook probe; printf "%s|%s" "$rc" "$_COPILOT_ADAPTER_PATHS"', env=env)
+               'log hook probe; printf "%s|%s" "$rc" "$_COPILOT_ADAPTER_PATHS"',
+               env=env, cwd=tmp_path)
     assert out == "0|0"
+
+
+def test_init_sources_lib_session_id_itself(tmp_path):
+    """Only LIB is sourced here: before init the resolver is absent (the
+    control), after it the prefix strip works, so init loaded it."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR",
+                        "REMEMBER_HOOK_CWD", "REMEMBER_DIR")}
+    env.update({"HOME": posix(tmp_path), "USERPROFILE": str(tmp_path)})
+    out = _out('declare -F remember_session_id_resolve >/dev/null; before=$?\n'
+               f'remember_copilot_adapter_init "{posix(SCRIPTS)}/copilot-x-hook.sh"; rc=$?\n'
+               'remember_copilot_strip_session_id_into p "$1"\n'
+               'printf "%s|%s|%s" "$before" "$rc" "$p"',
+               f'{{"session_id":"{PREFIXED}"}}', env=env, cwd=tmp_path, session_lib=False)
+    assert out == f'1|0|{{"session_id":"{UUID}"}}'
 
 
 def test_init_refuses_a_directory_without_lib_session_id(tmp_path):

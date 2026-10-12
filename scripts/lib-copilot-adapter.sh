@@ -24,7 +24,12 @@
 # Bash 3.2 safe: parameter expansion, `[ ]` and `[[ == ]]` glob tests, printf
 # -v; no `case` (the release-tree checker refuses it), no regex, no arrays.
 # The double quote and the backslash are held in variables (octal 042 and
-# 134), the spelling upstream's own extractor uses (#898 round 8).
+# 134), the spelling upstream's own extractor uses (#898 round 8). A pattern
+# substitution with a quoted replacement is never itself double-quoted
+# (x=${v//"$a"/"$b"}, as log.sh does): before bash 4.3 the quotes of the
+# replacement would survive into the result. Where the replacement holds
+# backslashes (the JSON path escape) there is no replacement at all: a loop
+# of prefix and suffix removals, which no bash version reads differently.
 # ============================================================================
 
 # remember_copilot_adapter_init SCRIPT -> 0, or 1 when the wrapper must exit
@@ -65,8 +70,10 @@ remember_copilot_adapter_init() {
     return 0
 }
 
-# remember_copilot_read_stdin_into VAR -> VAR = all of stdin, or "" when
-# stdin is a terminal (never read: it would wait for a person). Returns 0.
+# remember_copilot_read_stdin_into VAR -> VAR = stdin as `$(cat)` yields it:
+# every byte except trailing newlines, which command substitution drops (and
+# NUL bytes, which a bash variable cannot hold). "" when stdin is a terminal
+# (never read: it would wait for a person). Returns 0.
 remember_copilot_read_stdin_into() {
     local _rcr_val=""
     if [ ! -t 0 ]; then
@@ -97,7 +104,7 @@ remember_copilot_field_into() {
     fi
     _rcf_val="${_rcf_rest#*"$_rcf_dq"}"
     _rcf_val="${_rcf_val%%"$_rcf_dq"*}"
-    _rcf_val="${_rcf_val//"$_rcf_bs$_rcf_bs"/"$_rcf_bs"}"
+    _rcf_val=${_rcf_val//"$_rcf_bs$_rcf_bs"/"$_rcf_bs"}
     [ -n "$_rcf_val" ] || return 1
     printf -v "$_rcf_var" '%s' "$_rcf_val"
     return 0
@@ -169,12 +176,16 @@ remember_copilot_prepend_field_into() {
 # VAR = "" and returns 1 when PATH holds a double quote, which the core
 # hooks' first-match reader cannot carry.
 remember_copilot_json_escape_path_into() {
-    local _rce_dq _rce_bs
+    local _rce_dq _rce_bs _rce_rest="$2" _rce_val=""
     printf -v "$1" '%s' ""
     printf -v _rce_dq '\042'
     printf -v _rce_bs '\134'
     [[ "$2" == *"$_rce_dq"* ]] && return 1
-    printf -v "$1" '%s' "${2//"$_rce_bs"/"$_rce_bs$_rce_bs"}"
+    while [[ "$_rce_rest" == *"$_rce_bs"* ]]; do
+        _rce_val="$_rce_val${_rce_rest%%"$_rce_bs"*}$_rce_bs$_rce_bs"
+        _rce_rest="${_rce_rest#*"$_rce_bs"}"
+    done
+    printf -v "$1" '%s' "$_rce_val$_rce_rest"
     return 0
 }
 
