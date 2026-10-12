@@ -5,8 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh\"",
-            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" session-start-hook.sh; exit $LASTEXITCODE"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh\""
           }
         ]
       }
@@ -16,8 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-hook.sh\"",
-            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" user-prompt-hook.sh; exit $LASTEXITCODE"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-hook.sh\""
           }
         ]
       }
@@ -27,8 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-hook.sh\"",
-            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" post-tool-hook.sh; exit $LASTEXITCODE"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-hook.sh\""
           }
         ]
       }
@@ -39,7 +36,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end-hook.sh\"",
-            "powershell": "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\scripts\\run-hook.ps1\" session-end-hook.sh; exit $LASTEXITCODE",
             "timeout": 10
           }
         ]

@@ -161,3 +161,27 @@ def test_root_manifest_is_a_version_site():
 @pytest.mark.parametrize("name", _SCRIPTS_THAT_MUST_EXIST)
 def test_named_script_exists(name):
     assert (SCRIPTS / name).is_file()
+
+
+def _unbound(script_names, handlers) -> list[str]:
+    """The names in SCRIPT_NAMES that no handler's `bash` value mentions."""
+    bound = " ".join(h.get("bash", "") for h in handlers)
+    return sorted(n for n in script_names if f"/scripts/{n}" not in bound)
+
+
+def test_every_copilot_script_is_bound():
+    """tests/test_hooks_json.py's wiring guard exempts scripts/copilot-*.sh
+    (hooks/hooks.json is upstream's); this is their wiring guard instead: a
+    copilot-*.sh that hooks/hooks.copilot.json never binds is dead code.
+    Vacuous until the wrappers land (Tasks 3-6); the control below is not."""
+    names = [p.name for p in SCRIPTS.glob("copilot-*.sh")]
+    assert _unbound(names, [h for _loc, _e, h in _handlers()]) == []
+
+
+def test_the_binding_check_reports_an_unbound_name():
+    """Positive control for the guard above: against the real handlers, a
+    bound name is found and an unbound one is reported."""
+    handlers = [h for _loc, _e, h in _handlers()]
+    assert _unbound(["copilot-session-end-hook.sh"], handlers) == []
+    assert _unbound(["copilot-session-end-hook.sh", "copilot-stray.sh"], handlers) == [
+        "copilot-stray.sh"]

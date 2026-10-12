@@ -199,18 +199,18 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 453): _CASE,
+    ("scripts/post-tool-hook.sh", 449): _CASE,
     # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
     # allowlisted ranges, re-pinned to where they now live). Shifted +3 again
     # by #973's rewrite of that same cache's keying comment block.
-    ("scripts/post-tool-hook.sh", 743): _CASE,
-    ("scripts/post-tool-hook.sh", 786): _CASE,
-    ("scripts/post-tool-hook.sh", 842): _CASE,
-    ("scripts/session-end-hook.sh", 219): _CASE,
-    ("scripts/session-end-hook.sh", 227): _CASE,
-    ("scripts/session-start-hook.sh", 301): _CASE,
+    ("scripts/post-tool-hook.sh", 726): _CASE,
+    ("scripts/post-tool-hook.sh", 769): _CASE,
+    ("scripts/post-tool-hook.sh", 825): _CASE,
+    ("scripts/session-end-hook.sh", 201): _CASE,
+    ("scripts/session-end-hook.sh", 209): _CASE,
+    ("scripts/session-start-hook.sh", 289): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
     ("scripts/lib-slug.sh", 437): _CASE,

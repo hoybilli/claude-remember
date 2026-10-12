@@ -33,15 +33,14 @@ def _isolate_claude_config_dir(monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
-# Copilot host signals (issue: vscode). The hooks now read COPILOT_CLI and
-# COPILOT_PLUGIN_ROOT to decide the host hint (scripts/lib-session-id.sh), and
-# both are exported into the shell a Copilot CLI or VS Code Agents shell tool
-# runs -- exactly where this port's users run `pytest`. Inherited, they turned
-# pre-existing Claude Code-path tests (the #842 budget, #660 promo-spawn and
-# #596 agy-promo modules) into Copilot-path runs and failed them. Only these
-# three are cleared: other hosts' signatures (CLAUDE_CODE_*, CODEX_*,
-# ANTIGRAVITY_*) are left alone on purpose, since existing tests may rely on
-# the developer's own host env; a test that wants any of them sets it itself.
+# Copilot host signals (issue: vscode). pipeline.host.copilot_session() reads
+# COPILOT_CLI, COPILOT_PLUGIN_ROOT and REMEMBER_HOST_HINT, and the first two
+# are exported into the shell a Copilot CLI or VS Code Agents shell tool runs
+# -- exactly where this port's users run `pytest`. Inherited, they turn
+# Claude Code-path tests into Copilot-path runs. Only these three are
+# cleared: other hosts' signatures (CLAUDE_CODE_*, CODEX_*, ANTIGRAVITY_*)
+# are left alone on purpose, since existing tests may rely on the developer's
+# own host env; a test that wants any of them sets it itself.
 _COPILOT_HOST_ENV_VARS = ("COPILOT_CLI", "COPILOT_PLUGIN_ROOT", "REMEMBER_HOST_HINT")
 
 

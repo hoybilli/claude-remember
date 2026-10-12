@@ -97,6 +97,7 @@ def test_every_shipped_hook_script_is_wired():
             # hooks/hooks.copilot.json, which only those hosts load (root
             # plugin.json); hooks/hooks.json stays upstream's. Their own
             # wiring guard: tests/test_hooks_copilot_json_vscode.py's
+            # test_every_copilot_script_is_bound,
             # test_every_handler_has_bash_and_powershell_and_no_command
             # and test_named_script_exists.
             continue
@@ -478,7 +479,29 @@ def test_command_strings_are_unchanged_for_claude_code():
     assert [h["command"] for h in hooks] == [
         f'bash "${{CLAUDE_PLUGIN_ROOT}}/scripts/{name}"' for name in _HOOK_SCRIPT_NAMES
     ]
+    assert _keys_beyond_upstream(hooks) == []
     assert RUN_HOOK_PS1.is_file(), "scripts/run-hook.ps1 is missing"
+
+
+# The only keys upstream's handlers carry. A `powershell` key (which the
+# inline port once added to hooks/hooks.json) or any other is a fork.
+_UPSTREAM_HANDLER_KEYS = frozenset({"type", "command", "timeout"})
+
+
+def _keys_beyond_upstream(handlers) -> list[list[str]]:
+    return [sorted(set(h) - _UPSTREAM_HANDLER_KEYS) for h in handlers
+            if not set(h) <= _UPSTREAM_HANDLER_KEYS]
+
+
+def test_the_key_check_sees_the_copilot_files_powershell_key():
+    """Positive control for the key-set assertion above: the same check on
+    hooks/hooks.copilot.json, whose handlers do carry `bash` and
+    `powershell`, reports them -- so an empty result for hooks/hooks.json is
+    not a check that cannot see."""
+    handlers = [h for _loc, h in _iter_entries()]
+    assert handlers, "no handlers in hooks/hooks.copilot.json"
+    assert all("powershell" in extra for extra in _keys_beyond_upstream(handlers))
+    assert len(_keys_beyond_upstream(handlers)) == len(handlers)
 
 
 _WIN_POWERSHELL = shutil.which("powershell.exe") if sys.platform == "win32" else None

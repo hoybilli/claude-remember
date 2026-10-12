@@ -255,7 +255,6 @@ fi
 export REMEMBER_HOOK_CWD
 
 source "$_HOOK_DIR/lib-clock.sh"
-source "$_HOOK_DIR/lib-session-id.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
 # Defined here rather than beside the dispatch it also guards, because the fast
@@ -423,9 +422,6 @@ fi
 # extracted from that same capture rather than reading stdin a second time —
 # it is a single stream and a second read here would see EOF.
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
-remember_session_id_resolve "$STDIN_SESSION_ID"   # issue: vscode -- no fork (#511)
-STDIN_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
-REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id now faces too (#620) -- both are
@@ -575,19 +571,6 @@ if [ -z "$SESSION_DIR" ]; then
 fi
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
-
-# issue: vscode -- VS Code Agents / Copilot sends no transcript_path, and keeps
-# its transcript under ~/.copilot/session-state/<uuid>/, never under Claude
-# Code's projects dir. Found by the stdin uuid, it then takes the
-# STDIN_TRANSCRIPT_PATH branches below (LATEST_JSONL, and trust in the id). Set
-# only AFTER the REMEMBER_TRANSCRIPT_PATH export above, deliberately: exporting
-# it would switch on pipeline/haiku.py's Copilot-envelope receipt. The `_into`
-# form sets a global instead of forking a $(...) (#511), and refuses an empty
-# id itself.
-[ -z "$STDIN_TRANSCRIPT_PATH" ] && remember_copilot_transcript_into "$STDIN_SESSION_ID" && {
-    STDIN_TRANSCRIPT_PATH=$REMEMBER_COPILOT_TRANSCRIPT
-    log "hook" "post-tool: copilot transcript $STDIN_TRANSCRIPT_PATH"
-}
 
 # --- Count JSONL lines in the current session ---
 # A slug that does not match the directory Claude Code actually created leaves

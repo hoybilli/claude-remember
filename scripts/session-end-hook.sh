@@ -38,24 +38,10 @@
 #
 #   `reason` is documented (Claude Code hooks reference, checked 2026-08) as
 #   one of clear/resume/logout/prompt_input_exit/other, but is treated here as
-#   an opaque, unvalidated token — logged for diagnostics, and branched on in
-#   exactly one place (below). No reason this hook has actually observed in
-#   the wild disqualifies a flush: the whole point is that this is the last
-#   chance, not a routine tick, so every reason gets the same unconditional
-#   attempt.
-#
-#   The one exception is opt-in and changes WHEN, not WHETHER (issue:
-#   vscode). VS Code Agents (the Copilot harness) sends SessionEnd with
-#   reason=complete after every turn and nothing on close, so this hook's
-#   save runs once per turn there. When the host hint is `copilot`, the
-#   reason is `complete`, a validated session id is present and
-#   cooldowns.turn_end_debounce_seconds is a positive integer N, the
-#   backgrounded save first sleeps N seconds and is dropped if a later
-#   turn's SessionEnd for the same session has replaced its token in
-#   tmp/turn-end.<session-id> -- one save per burst of turns, N seconds
-#   after the last one. The key defaults to 0, and at 0 (or any value that
-#   is not a plain non-negative integer), on any other host and for any
-#   other reason, the save runs immediately exactly as before.
+#   an opaque, unvalidated token — logged for diagnostics, never branched on.
+#   No reason this hook has actually observed in the wild disqualifies a
+#   flush: the whole point is that this is the last chance, not a routine
+#   tick, so every reason gets the same unconditional attempt.
 #
 #   Whether SessionEnd fires at all on a crash, a killed terminal, or a
 #   process hitting the usage cap is NOT established by that same reference —
@@ -165,7 +151,6 @@ else
 fi
 
 source "$_HOOK_DIR/lib-clock.sh"
-source "$_HOOK_DIR/lib-session-id.sh"
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionStart hook use: the key must be followed by nothing but
@@ -199,9 +184,6 @@ _stdin_json_string() {
 }
 
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
-remember_session_id_resolve "$STDIN_SESSION_ID"   # issue: vscode -- no fork (#511)
-STDIN_SESSION_ID=$REMEMBER_SESSION_ID_NORMALIZED
-REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT; export REMEMBER_HOST_HINT
 # stdin is not more trustworthy than a basename — same validation
 # the PostToolUse hook applies before this id becomes a path component or an
 # argument to another script.
@@ -246,12 +228,6 @@ if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
     REMEMBER_TRANSCRIPT_PATH=""
 fi
 export REMEMBER_TRANSCRIPT_PATH
-# issue: vscode -- VS Code hands over a transcript_path that cannot exist on
-# Windows (a directory name containing a colon). It is exported as-is, as the
-# SessionStart hook does: pipeline/haiku.py skips the "vanished transcript"
-# receipt on the Copilot host itself (pipeline.host.copilot_session, true
-# whenever REMEMBER_HOST_HINT=copilot, exported above), and
-# pipeline.host.transcript_path() reads a missing file as unset.
 
 # ── The cwd the host handed us (#411) ─────────────────────────────────────
 # Same field, same reasoning as the SessionStart hook's identical block:
@@ -422,75 +398,6 @@ if [ ! -f "$SAVE_SCRIPT" ]; then
     exit 0
 fi
 
-# --- Opt-in turn-end debounce (issue: vscode) ---
-# The one exception the header's STDIN section describes. Off unless all of:
-# the Copilot host hint, reason=complete (what that host sends after every
-# turn), a validated session id, and cooldowns.turn_end_debounce_seconds a
-# positive integer. Anything else leaves _TURN_END_DEBOUNCE at 0 and the
-# subshell below takes today's path untouched: no token file, no sleep.
-#
-# No session id, no debounce: the token file is keyed by it, and without one
-# every session in this store would share a single token -- a turn in one
-# window could cancel another window's save. save-session.sh without an id
-# also picks its session by discovery, so a deferred call could save a
-# different session than the turn that scheduled it.
-#
-# The token is written HERE, by this (already detached) hook process, before
-# the fork below -- so it is on disk before this turn's own sleeper can read
-# it. The sleep happens only inside the backgrounded subshell; nothing here
-# waits, so the host-facing process (which returned at the detach near the
-# top of this file) is unaffected either way. A later turn rewrites the file
-# with `>`; a sleeper that reads it mid-write sees an empty or partial token,
-# which differs from its own, and stands down -- correct, since the writer is
-# a newer turn whose own sleeper will save. The winner removes the file just
-# before it saves; a newer token written in the instant between its read and
-# that removal is lost with the file, and that newer sleeper stands down --
-# acceptable, because the winner's save starts after that newer turn ended
-# and so reads its content too.
-#
-# During the window, tmp/save-session.pid (written below) names the sleeping
-# subshell, so post-tool-hook.sh treats a save as already in flight -- which
-# it is, N seconds out -- and skips its delta saves until the sleeper is done.
-# N is capped at 3600 for that reason.
-#
-# Digits only, same guard as save-session.sh's own config reads: a typo, a
-# negative, a fraction or a boolean degrades to 0, which is today's path.
-# More than nine digits is treated the same way, so 10# below cannot wrap a
-# huge value into an arbitrary one.
-_TURN_END_DEBOUNCE=0
-# _TURN_END_MARK holds this turn's token (pid-random-epoch), the one it
-# writes to _TURN_END_FILE and its sleeper compares against.
-_TURN_END_MARK=""
-_TURN_END_FILE=""
-if [ "${REMEMBER_HOST_HINT:-}" = copilot ] && [ "$SESSION_END_REASON" = complete ] \
-    && [ -n "$STDIN_SESSION_ID" ] && declare -F config_into >/dev/null 2>&1; then
-    config_into _TURN_END_DEBOUNCE ".cooldowns.turn_end_debounce_seconds" 0
-    if [ -z "$_TURN_END_DEBOUNCE" ] || [[ "$_TURN_END_DEBOUNCE" == *[!0-9]* ]] \
-        || [[ "$_TURN_END_DEBOUNCE" == ??????????* ]]; then
-        _TURN_END_DEBOUNCE=0
-    fi
-    _TURN_END_DEBOUNCE=$(( 10#$_TURN_END_DEBOUNCE ))
-    # Capped at an hour: the sleeper's pid holds tmp/save-session.pid for the
-    # whole window, which also suspends post-tool delta saves, so a huge
-    # value would mean a session that is never saved.
-    if [ "$_TURN_END_DEBOUNCE" -gt 3600 ]; then
-        log "hook" "session-end: cooldowns.turn_end_debounce_seconds=$_TURN_END_DEBOUNCE clamped to 3600"
-        _TURN_END_DEBOUNCE=3600
-    fi
-    if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
-        _TURN_END_FILE="$REMEMBER_DIR/tmp/turn-end.$STDIN_SESSION_ID"
-        _TURN_END_MARK="$$-$RANDOM-$(_remember_date +%s)"
-        if printf '%s\n' "$_TURN_END_MARK" > "$_TURN_END_FILE" 2>/dev/null; then
-            log "hook" "session-end: turn-end save deferred ${_TURN_END_DEBOUNCE}s (cooldowns.turn_end_debounce_seconds)"
-        else
-            # A sleeper with no token on disk would always stand down and
-            # nothing would save. Save now instead, and say why.
-            log "hook" "session-end: could not write $_TURN_END_FILE -- turn-end save not deferred"
-            _TURN_END_DEBOUNCE=0
-        fi
-    fi
-fi
-
 # --- Flush, unconditionally, in the BACKGROUND ---
 # save-session.sh --force bypasses its own cooldown timer AND its
 # min-human-message gate (see its own USAGE block) — exactly the two gates
@@ -551,16 +458,6 @@ if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
 fi
 (
-    if [ "$_TURN_END_DEBOUNCE" -gt 0 ]; then
-        sleep "$_TURN_END_DEBOUNCE"
-        _turn_end_seen=""
-        { read -r _turn_end_seen < "$_TURN_END_FILE"; } 2>/dev/null
-        if [ "$_turn_end_seen" != "$_TURN_END_MARK" ]; then
-            log "hook" "session-end: turn-end save superseded by a later turn"
-            exit 0
-        fi
-        rm -f "$_TURN_END_FILE" 2>/dev/null
-    fi
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
     else

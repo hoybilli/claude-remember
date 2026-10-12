@@ -1,10 +1,16 @@
 """scripts/lib-session-id.sh: VS Code Agents prefixes are stripped before the
-hooks' existing validators see the id (issue: vscode; review focus 3)."""
+core hooks' validators see the id (issue: vscode; review focus 3).
+
+remember_session_id_resolve is strip-only: the hint it returns says whether
+the prefix was there and nothing else. Which host is running is no longer a
+shell question -- only the Copilot hosts load the wrappers that call it, and
+they export REMEMBER_HOST_HINT=copilot themselves
+(scripts/lib-copilot-adapter.sh).
+"""
 from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -17,27 +23,13 @@ LIB = REPO_ROOT / "scripts" / "lib-session-id.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no POSIX bash found (Git Bash on Windows)")
 
-# The exact validator every hook already applies, copied verbatim so the test
+# The exact validator every core hook applies, copied verbatim so the test
 # proves the two layers agree rather than re-implementing either.
 VALIDATE = """case "$id" in ''|.|..|-*|*[!A-Za-z0-9._-]*) id="" ;; esac"""
 
-
-sys.path.insert(0, str(REPO_ROOT))
-from pipeline import host as _host  # noqa: E402
-
-# Every host registered before COPILOT in pipeline.host.REGISTRY: detect_host
-# returns the first host whose signature is set, so each of these must win
-# over Copilot's signature in the shell hint too (read from the registry, not
-# copied, so a new host row cannot silently drift).
-_EARLIER_HOSTS = _host.REGISTRY[:_host.REGISTRY.index(_host.COPILOT)]
-_EARLIER_SIGNATURES = tuple(v for h in _EARLIER_HOSTS for v in h.signature_vars)
-
-# Signals the host hint reads, and the resolver's own globals. The suite
-# itself runs inside a Claude Code session, so these must be stripped from the
-# inherited env and only the ones a case names put back -- otherwise a case
-# tests the developer's shell.
 _HOST_ENV = HOST_ENV + ("COPILOT_HOME", "REMEMBER_SESSION_ID_NORMALIZED",
                         "REMEMBER_SESSION_ID_HINT")
+
 
 def _bash(body: str, *args: str, extra_env: dict | None = None) -> str:
     """Source the library, run `body` with `args` as $1.., return stdout. The
@@ -51,13 +43,12 @@ def _bash(body: str, *args: str, extra_env: dict | None = None) -> str:
 
 
 def run(raw: str, extra_env: dict | None = None) -> tuple[str, str]:
-    """`remember_session_id_resolve` as a hook calls it, then the hooks' own
-    validator: returns (id, hint)."""
+    """`remember_session_id_resolve`, then the core hooks' own validator:
+    returns (id, hint)."""
     out = _bash(
-        'remember_session_id_resolve "$1"; id=$REMEMBER_SESSION_ID_NORMALIZED; '
-        'REMEMBER_HOST_HINT=$REMEMBER_SESSION_ID_HINT\n'
+        'remember_session_id_resolve "$1"; id=$REMEMBER_SESSION_ID_NORMALIZED\n'
         f'{VALIDATE}\n'
-        'printf "%s|%s" "$id" "${REMEMBER_HOST_HINT:-}"\n',
+        'printf "%s|%s" "$id" "$REMEMBER_SESSION_ID_HINT"\n',
         raw, extra_env=extra_env)
     return tuple(out.split("|", 1))
 
@@ -82,47 +73,24 @@ def test_other_colon_forms_are_left_for_the_validator():
     assert run("abc:def")[0] == ""
 
 
-@pytest.mark.parametrize("env", [{"COPILOT_CLI": "1"}, {"COPILOT_PLUGIN_ROOT": "/x"}],
-                         ids=["copilot-cli", "copilot-plugin-root-only"])
-def test_bare_uuid_with_a_copilot_signature_is_copilot(env):
-    assert run(UUID, env) == (UUID, "copilot")
-
-
-@pytest.mark.parametrize("earlier_var", _EARLIER_SIGNATURES)
-@pytest.mark.parametrize("copilot_var", _host.COPILOT.signature_vars)
-def test_hint_agrees_with_detect_host_for_every_earlier_signature(earlier_var, copilot_var):
-    """Registry-derived parity: whatever detect_host says for this env, the
-    shell hint says copilot exactly when detect_host says COPILOT -- so a
-    Claude Code, Codex or Antigravity session whose env also carries a Copilot
-    signature keeps its own plain recap. Every earlier signature against
-    every Copilot one, with plain non-blank values (the two sides differ only
-    on whitespace-only values, which this does not use)."""
-    env = {copilot_var: "1", earlier_var: "x"}
-    assert _host.detect_host(env) is not _host.COPILOT
+@pytest.mark.parametrize("env", [{"COPILOT_CLI": "1"}, {"COPILOT_PLUGIN_ROOT": "/x"},
+                                 {"COPILOT_HOME": "/h/.copilot"}],
+                         ids=["copilot-cli", "copilot-plugin-root", "copilot-home"])
+def test_environment_does_not_set_the_hint(env):
+    """Strip-only: a bare uuid stays hint-less whatever the environment
+    carries. Positive control: the prefixed id under the same environment."""
     assert run(UUID, env) == (UUID, "")
-    # positive control: the same Copilot var alone is copilot on both sides
-    assert _host.detect_host({copilot_var: "1"}) is _host.COPILOT
-    assert run(UUID, {copilot_var: "1"}) == (UUID, "copilot")
-
-
-def test_copilot_home_alone_is_not_a_signature():
-    """A configuration path a user may set anywhere (#463)."""
-    assert run(UUID, {"COPILOT_HOME": "/h/.copilot"}) == (UUID, "")
-
-
-def test_prefixed_id_in_clean_env_is_copilot():
-    """Positive control for the negatives above: the id route needs no env."""
-    assert run(f"agent-host-copilotcli:/{UUID}") == (UUID, "copilot")
+    assert run(f"agent-host-copilotcli:/{UUID}", env) == (UUID, "copilot")
 
 
 # ── The no-fork entry point itself (issue: vscode, #511) ──────────────────
 
-def _resolve_twice(first: str, second: str, extra_env: dict | None = None) -> str:
+def _resolve_twice(first: str, second: str) -> str:
     return _bash(
         'remember_session_id_resolve "$1"\n'
         'remember_session_id_resolve "$2"\n'
         'printf "%s|%s" "$REMEMBER_SESSION_ID_NORMALIZED" "$REMEMBER_SESSION_ID_HINT"\n',
-        first, second, extra_env=extra_env)
+        first, second)
 
 
 def test_resolve_overwrites_both_globals_on_every_call():
@@ -134,7 +102,6 @@ def test_resolve_overwrites_both_globals_on_every_call():
 
 def test_resolve_with_empty_raw_sets_empty_id():
     assert _resolve_twice("x", "") == "|"
-    assert _resolve_twice("x", "", {"COPILOT_CLI": "1"}) == "|copilot"
 
 
 def test_resolve_body_has_no_command_substitution():
