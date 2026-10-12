@@ -278,17 +278,21 @@ def test_the_same_session_keeps_its_incremental_count(tmp_path):
 
 def test_alternating_sessions_each_count_their_own_file(tmp_path):
     """Two Copilot chats of one project taking turns (VS Code allows
-    several): A, then B, then A again with 5 more lines. A's count must be
-    its own file's, 15 lines, not B's carried over."""
+    several): A, then B, then A again with 15 more lines. B leaves
+    `1000 40`; A's file is then 25 lines of 50 bytes (1250 bytes, a newline
+    at byte 999), so the core's sanity check accepts B's offset and, unguarded,
+    would resume there and report 40 + 5 = 45. A's count must be its own
+    file's: 25 lines."""
     sb = Sandbox(tmp_path)
     a = _session_events(sb, UUID, _sized_lines(50, 10))
     sb.run(session_id=UUID)
     _session_events(sb, OTHER_UUID, _sized_lines(25, 40))
     sb.run(session_id=OTHER_UUID)
+    assert _scan_count(sb) == "1000 40"
     with a.open("ab") as f:
-        f.write(_sized_lines(50, 5))
+        f.write(_sized_lines(50, 15))
     sb.run(session_id=UUID)
-    assert _scan_count(sb) == "750 15"
+    assert _scan_count(sb) == "1250 25"
 
 
 def test_an_unusable_owner_record_costs_a_rescan_not_the_hook(tmp_path):
@@ -296,7 +300,9 @@ def test_an_unusable_owner_record_costs_a_rescan_not_the_hook(tmp_path):
     the hook still exits 0, writes nothing about it to hook-errors.log
     (bootstrap-dirs.sh sends the hooks' stderr there, and doctor.sh reports
     that file), and the count is still B's own, from a full scan. Positive
-    control for the count: the reset case above."""
+    control for the count: the reset case above. Positive control for the
+    log assertion: test_hook_stderr_reaches_hook_errors_log below, which
+    shows this Sandbox's hook stderr does land in that file."""
     sb = Sandbox(tmp_path)
     (sb.remember / "tmp" / "copilot-scan-owner").mkdir()
     _session_events(sb, UUID, _sized_lines(50, 10))
@@ -307,6 +313,25 @@ def test_an_unusable_owner_record_costs_a_rescan_not_the_hook(tmp_path):
     errors = sb.remember / "logs" / "hook-errors.log"
     assert "copilot-scan-owner" not in (errors.read_text(encoding="utf-8", errors="replace")
                                         if errors.exists() else "")
+
+
+def test_hook_stderr_reaches_hook_errors_log(tmp_path):
+    """Positive control for the hook-errors.log assertion above: the
+    adapter's init sources bootstrap-dirs.sh, which points the wrapper's fd 2
+    at logs/hook-errors.log, and the core inherits that fd. A stub core that
+    writes a marker to stderr must find it in that file. If the Sandbox ever
+    stops routing stderr there (REMEMBER_TRACE=1, an xtrace), this fails
+    instead of the negative assertion passing vacuously."""
+    sb = Sandbox(tmp_path)
+    marker = "STUB-CORE-STDERR-7f3a"
+    (sb.plugin / "scripts" / "post-tool-hook.sh").write_bytes(
+        ("#!/bin/bash\ncat >/dev/null\n"
+         f"echo {marker} >&2\nexit 0\n").encode())
+    _session_events(sb, UUID, _sized_lines(50, 10))
+    sb.run(session_id=UUID)
+    errors = sb.remember / "logs" / "hook-errors.log"
+    assert errors.is_file()
+    assert marker in errors.read_text(encoding="utf-8", errors="replace")
 
 
 # --- Exit status and the missing library -----------------------------------
