@@ -221,7 +221,7 @@ def _python_stub_dir(tmp_path, version):
     calls = tmp_path / "calls.txt"
     probe = "exit 1" if version is None else f"echo 'Python {version}'; exit 0"
     body = ("#!/bin/sh\n"
-            f"printf '%s\n' \"$*\" >> '{posix(calls)}'\n"
+            f"printf '%s\\n' \"$*\" >> '{posix(calls)}'\n"
             "for a in \"$@\"; do\n"
             f"    [ \"$a\" = -V ] && {{ {probe}; }}\n"
             "done\n"
