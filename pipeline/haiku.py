@@ -266,13 +266,13 @@ def _choose_summarizer_provider() -> str:
         # function's contract ("a usable path or None") unchanged for every
         # other caller.
         raw = (os.environ.get("REMEMBER_TRANSCRIPT_PATH") or "").strip()
-        # issue: vscode -- VS Code hands over a transcript_path that cannot
-        # exist on Windows (a directory name containing a colon), so on the
-        # Copilot host a missing file is the normal case, not #477's
-        # vanished transcript: no receipt there. Every other host keeps it.
-        # (session-start-hook.sh used to blank the variable on that host
-        # itself; the check moved here to keep the compiled hook inside
-        # v0.40.0's size budget.)
+        # issue: vscode -- no receipt on the Copilot host. There the payload
+        # carries no transcript_path of its own; scripts/copilot-post-tool-
+        # hook.sh adds one only when the session's events.jsonl exists, and
+        # the core hooks (upstream's, unchanged) export what they accept.
+        # A set-but-missing path on that host is not treated as #477's
+        # vanished transcript (tests/test_session_start_host_rule_vscode.py
+        # pins both sides). Every other host keeps the receipt.
         if raw and not _host.copilot_session():
             _warn(
                 f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "

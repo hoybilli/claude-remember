@@ -95,7 +95,7 @@ Observed working against `agy` 1.1.27: capture was driven end to end against a r
 
 Observed on Windows 11 and macOS 27: hooks fire in all three hosts, and saves run (for the CLI, recorded on macOS only). Install, the saving behaviour to choose, troubleshooting and removal: [docs/install-vscode.md](docs/install-vscode.md).
 
-These hosts load the plugin through its own Copilot manifest (`plugin.json`, `hooks/hooks.copilot.json`); Claude Code never reads it.
+These hosts load the plugin through its own Copilot manifest (`plugin.json`, `hooks/hooks.copilot.json`); Claude Code never reads it (**observed** in the 2026-10-08 probe).
 
 ## Requirements
 

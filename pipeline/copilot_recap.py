@@ -153,9 +153,12 @@ def _write_all(fd: int, data: bytes) -> None:
 def _wrap_in_place(path: str) -> None:
     """Rewrite PATH, in place, to ``envelope`` of its own contents.
 
-    In place, not write-then-rename: the hook still holds PATH open as its
-    stdout while this runs, and Windows refuses to replace a file another
-    process has open (observed: WinError 5 on Windows 11).
+    In place, not write-then-rename: Windows refuses to replace a file
+    another process has open (observed: WinError 5 on Windows 11, when the
+    inline port's hook still held PATH open as its stdout). Under
+    scripts/copilot-session-start-hook.sh the capture redirect covers only
+    the core hook and is closed before this runs; in place is kept because
+    it is safe either way.
 
     Unbuffered (``os.write``, no Python file buffer): every byte has reached
     the file, or failed, by the time ``_write_all`` returns, so a failure
