@@ -215,7 +215,11 @@ def test_compat42_really_keeps_quotes_in_a_double_quoted_replacement():
     shape they guard against does misbehave, so they are not vacuous."""
     r = subprocess.run([BASH, "-c", 'x=a/b; s=/; printf "%s" "${x//"$s"/"$s$s"}"'],
                        capture_output=True, env=_compat42_env(), timeout=60)
-    assert decode_bash_output(r.stdout) != "a//b"
+    assert r.returncode == 0, decode_bash_output(r.stderr)
+    out = decode_bash_output(r.stdout)
+    # The exact misbehaviour: the replacement's quotes survive into the result.
+    assert '"' in out
+    assert out == 'a"//"b'
 
 
 @compat42
