@@ -135,7 +135,7 @@ The live Windows runs before 2026-10-08 used earlier forms of the entry (2026-09
 
 ### 2026-10-08: the adapter layer
 
-The port no longer edits upstream's four core hooks or `hooks/hooks.json`; they are byte-identical to upstream `fd8b655` (empty `git diff`, **observed**), so upstream's 120 KiB compile gate (compiled `session-start-hook.sh`: 122,785 bytes) is upstream's alone.
+The port no longer edits upstream's four core hooks or `hooks/hooks.json`; they are byte-identical to upstream `fd8b655` (empty `git diff`, **observed**), so upstream's 120 KiB compile gate (compiled `session-start-hook.sh`: 122,785 bytes) is upstream's alone. Since the v0.43.1 catch-up the same holds against `ccd4506`, whose compiled `session-start-hook.sh` is 122,843 bytes ([that entry](#2026-10-12-upstream-v0431-catch-up)).
 
 Probe of the same day (throwaway plugin with three manifests and recorder hooks; the macOS VS Code and desktop app rows ran on 2026-10-11). The records do not carry the Copilot versions; those shown are from [Versions](#versions) (**reasoned**).
 
@@ -193,6 +193,31 @@ Same commit and routes, macOS 27.0.1 arm64, bash 3.2.57, Copilot CLI 1.0.94, Cla
 Doctor: the Copilot last-save line, `VERDICT: capture is working`; `hook-errors.log` empty. 4\. Claude Code: its model quoted `SessionStart:startup hook success: === REMEMBER ===` (plain recap), `session-end: reason=other`, no `copilot session` line.
 
 Summarizer: 5 Haiku calls via the `claude` provider, all `SKIP`, 0 memory files. Sentinel: `~/.copilot/installed-plugins` empty before and after; `~/.copilot` gained only `settings.json` (marketplace registration) and the desktop app's `crash-reports/` startup file (**reasoned** not plugin-made).
+
+### 2026-10-12: upstream v0.43.1 catch-up
+
+The branch merged upstream `ccd4506` (v0.43.1; 23 commits past `fd8b655`) at f468d60: no textual conflicts, and the four core hooks and `hooks/hooks.json` equal `ccd4506` (empty `git diff`, **observed**). Upstream's compiled `session-start-hook.sh` grew to 122,843 bytes, 37 under the 122,880 gate (upstream's margin). Four things changed for the Copilot hosts, each fixed or pinned in the port's own files: the root `plugin.json` version (0.43.1); #1003's Python floor (the SessionStart tests' stubs now print a version); #913's line count, shared by every `events.jsonl` until the PostToolUse wrapper's guard (see "What the hosts send"); and #1002's hidden save route on Windows, which the Copilot wrapper takes too (see "How hooks are launched on Windows").
+
+Suites at 129dc00, **observed** ("compiled": an export after `compile_hooks.py --apply`, as in CI; wall time is pytest's own):
+
+| Leg | Python | Passed / failed / skipped | Coverage | Wall time |
+|---|---|---|---|---|
+| Windows 11, jq 1.8.2 | 3.14.4 | 2,827 / 6 / 1,856 | 90% | 15 min 29 s |
+| Windows 11, compiled | 3.14.4 | 2,788 / 7 / 1,894 | 90% | 15 min 30 s |
+| WSL Ubuntu 26.04, jq 1.8.1 | 3.14.4 | 4,555 / 4 / 135 | 93% | 14 min 19 s |
+| WSL, compiled | 3.14.4 | 4,502 / 5 / 187 | 93% | 14 min 14 s |
+| macOS arm64 (Darwin 26), /bin/bash 3.2.57, jq 1.7.1 (Apple) | 3.14.7 | 4,543 / 0 / 149 | not relayed | 13 min 46 s |
+| macOS | 3.9.6 (Apple) | 4,543 / 0 / 149 | not relayed | 14 min 36 s |
+| macOS, compiled | 3.14.7 | 4,491 / 0 / 201 | not relayed | 13 min 48 s |
+| macOS, compiled | 3.9.6 (Apple) | 4,491 / 0 / 201 | not relayed | 14 min 29 s |
+
+Every failure is pre-existing. On Windows: `test_autonomous_log_retention_487` (3), the `test_migration` `MsysBackslash` cases (2) and `test_windows_real_fglock_1011::test_this_ci_hosts_own_build_does_not_warn` (1, build 26200; fails at `ccd4506` too). The export adds `test_doctor_sh_is_executable_in_git` (a lost executable bit, **reasoned**). On WSL: the four `test_lock_primitive` overlap cases. WSL compiled also failed `test_slug_index_297::test_concurrent_session_starts_do_not_lose_a_row`, a race in upstream's six-writer test. Run 10 times each on WSL it failed 2 and 5 times on `ccd4506` exports (compiled, plain) and 4 and 4 times at 129dc00, and it also failed in a full `ccd4506` suite (**observed**). macOS had no failure in any leg. Each compiled leg skips the #900 "compiled CI leg" set, which is not a failure. On WSL that set is +52 net, the same as macOS's 149 to 201 (**observed** on WSL, matching on macOS **reasoned** from the counts). Windows shows +38, since many of those tests already skip there. Every `*_vscode` module ran on WSL and macOS (on WSL the Windows-only hidden-route module skips). Review Focus 4 held: the macOS legs ran with `/opt/homebrew/bin`, which carries Homebrew's real `python3.N`, on PATH, and `test_session_start_copilot_stdout_vscode.py` passed in all four legs (**observed**). On bash 3.2 the adapter modules gave 105 passed / 4 skipped, all four `BASH_COMPAT needs bash >= 4.3`.
+
+Leftover processes: Windows `ps -W` printed 0 after both legs (it cannot see script names). On WSL and macOS each leg left processes behind, so the count was not 0. There were five `sleep 15`, gone within 30-40 s, and three `sleep 999`, re-parented to init, which expire after 999 s (about 15 minutes). The `sleep 999` come from stubs in upstream's unchanged `tests/test_windows_hidden_detach_1002.py`; a full `ccd4506` suite on WSL leaves the same set (**observed**). The `sleep 15` are lib-detach's watchdog (**reasoned**). No `copilot-session-end` process remained after any macOS leg.
+
+Delivery and setup on the Mac: the code reached it through a throwaway branch on the fork (`t5-gate`, its HEAD checked to be 129dc00), not the bundle. The venvs were Homebrew 3.14.7 and Apple 3.9.6 created for this run. Compiled `session-start-hook.sh` printed 122,897 bytes on every OS, which includes the 54-byte marker line.
+
+Release tree: `check_release_tree.py` exit 0, 0 FAIL, 17 REVIEW. The REVIEW set (line numbers masked) equals a `ccd4506` build's. 89 files: `ccd4506`'s 80 plus the 9 port files, none removed. `claude plugin validate .`: `Validation passed with warnings` (the root `CLAUDE.md` is not loaded as context).
 
 ### 2026-09-30: VS Code Agents, first live runs
 
