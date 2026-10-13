@@ -13,7 +13,7 @@ Versions run: VS Code 1.140.0 with Copilot Chat 0.68.0, Copilot CLI 1.0.92-3 and
 - `jq`: preinstalled on macOS 27 (`/usr/bin/jq`; check with `jq --version`); on Windows, install it ([windows.md](windows.md) lists Scoop and Chocolatey). The SessionStart recap does not need it: Python builds the JSON envelope the Copilot hosts inject (**observed** in `tests/test_session_start_copilot_stdout_vscode.py`, which hides `jq`). Without a working Python nothing is injected; `.remember/logs/memory-<date>.log` says `copilot session-start: envelope failed, plain recap`.
 - Claude Code's `claude` CLI on `PATH`, signed in: saves with new content, and a daily consolidation, are `claude -p` calls billed to your Claude account, not to Copilot (billing: reasoned).
 - The `copilot` CLI, for desktop app installs.
-- On Windows each hook starts through a small PowerShell launcher (`-ExecutionPolicy Bypass` for that one process); the live Windows runs used an earlier form of it, and the shipped form has run only in tests ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
+- On Windows each hook starts through a small PowerShell launcher (`-ExecutionPolicy Bypass` for that one process); its shipped form ran live in all three hosts on Windows on 2026-10-12 ([details](vscode-verification.md#how-hooks-are-launched-on-windows)).
 
 ## Install
 
